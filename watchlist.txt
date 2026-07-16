@@ -1,0 +1,9 @@
+# Quant Engine watchlist — one ticker per line. Edit freely.
+NVDA
+AMD
+AAPL
+MSFT
+TSLA
+SOFI
+PLTR
+AMZN
