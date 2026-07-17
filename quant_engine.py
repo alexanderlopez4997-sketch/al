@@ -1461,6 +1461,8 @@ def analyze_pipeline(ticker, df, interval, account=None, risk_pct=1.0):
         if ns is not None:
             rets = rets.mask(pd.Series(ns, index=data.d.index))
     ann_vol = float(rets.std() * math.sqrt(ppy) * 100)
+    maxdd = float((data.d["Close"]/data.d["Close"].cummax()-1).min()*100)
+    edge_status = data.edge_status if hasattr(data, 'edge_status') else "ACTIVE"
 
     return {
         "ticker": ticker,
@@ -1471,11 +1473,20 @@ def analyze_pipeline(ticker, df, interval, account=None, risk_pct=1.0):
         "stage_5_metrics": {
             "score": data.score, "last": data.last, "chg": data.chg,
             "atr": float(data.d["atr"].iloc[-1]), "atr_pct": data.atr_pct,
-            "ann_vol": ann_vol, "maxdd": float((data.d["Close"]/data.d["Close"].cummax()-1).min()*100),
+            "ann_vol": ann_vol, "maxdd": maxdd,
             "verdict": data.verdict, "conviction": data.conviction,
             "backtest": data.backtest, "backtest_by_regime": data.backtest_by_regime,
-            "edge_status": data.edge_status if hasattr(data, 'edge_status') else "ACTIVE",
-        }
+            "edge_status": edge_status,
+        },
+        # Flat aliases so multi-ticker views (scan/dashboard/categorize_portfolio/
+        # build_morning_briefs, all written against analyze()'s flat shape) can
+        # read a --pipeline result the same way, without pipeline-vs-flat branching
+        # at every call site. report_pipeline() still reads the stage_N_* keys above.
+        "score": data.score, "last": data.last, "chg": data.chg,
+        "atr_pct": data.atr_pct, "ann_vol": ann_vol, "maxdd": maxdd,
+        "verdict": data.verdict, "conviction": data.conviction, "regime": data.regime,
+        "bt": data.backtest, "bt_by_regime": data.backtest_by_regime,
+        "edge_status": edge_status,
     }
 
 def analyze(ticker, df, interval, weights=None, d=None, F=None, calibrate=False):
@@ -2218,9 +2229,8 @@ def main():
                 res = analyze(t, df, args.interval, weights)
             results.append((res, opt))
             if args.discord_alerts:
-                m = res["stage_5_metrics"] if args.pipeline else res
-                discord_conviction_alert(t, m["verdict"]["label"], m["conviction"],
-                                          m["score"], args.discord_threshold)
+                discord_conviction_alert(t, res["verdict"]["label"], res["conviction"],
+                                          res["score"], args.discord_threshold)
         except Exception as e:
             errors.append(f"{t}: {e}")
 
