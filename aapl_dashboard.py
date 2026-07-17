@@ -121,6 +121,41 @@ def fetch_macd_data(ticker: str, timespan: str = "day") -> Optional[Dict[str, An
         return None
 
 
+def fetch_rsi_data(ticker: str, window: int = 14, timespan: str = "day") -> Optional[Dict[str, Any]]:
+    """
+    Fetch RSI data from Massive API.
+
+    Args:
+        ticker: Stock ticker symbol
+        window: RSI window period (default 14)
+        timespan: Time period ('day', 'week', 'month')
+
+    Returns:
+        JSON response with RSI values, or None if request fails
+    """
+    try:
+        api_key = os.environ.get("MASSIVE_API_KEY")
+        if not api_key:
+            return None
+
+        base_url = "https://api.massive.com/v1/indicators/rsi"
+        params = {
+            "apiKey": api_key,
+            "timespan": timespan,
+            "window": window,
+            "series_type": "close",
+            "order": "desc",
+            "limit": 100,
+            "adjusted": "true"
+        }
+
+        response = requests.get(f"{base_url}/{ticker}", params=params, timeout=5)
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
+
+
 class AAPLDataProcessor:
     """Process AAPL stock data and generate analytics."""
 
@@ -235,7 +270,7 @@ class AAPLDataProcessor:
         return self.processed_data
 
     def generate_summary(self, include_sma: bool = True, include_ema: bool = True,
-                        include_macd: bool = True) -> Dict[str, Any]:
+                        include_macd: bool = True, include_rsi: bool = True) -> Dict[str, Any]:
         """Generate comprehensive summary statistics."""
         min_p, max_p, avg_p = self.get_price_range()
         change, pct_change = self.get_price_change()
@@ -261,6 +296,12 @@ class AAPLDataProcessor:
             if macd_response:
                 macd_data = macd_response
 
+        rsi_data = None
+        if include_rsi:
+            rsi_response = fetch_rsi_data("AAPL", window=14, timespan="day")
+            if rsi_response:
+                rsi_data = rsi_response
+
         return {
             "ticker": "AAPL",
             "data_points": len(self.processed_data),
@@ -282,7 +323,8 @@ class AAPLDataProcessor:
             "chart_data": self.get_chart_data(),
             "sma_data": sma_data,
             "ema_data": ema_data,
-            "macd_data": macd_data
+            "macd_data": macd_data,
+            "rsi_data": rsi_data
         }
 
 
@@ -296,6 +338,7 @@ def render_dashboard_html(summary: Dict[str, Any]) -> str:
     sma_data = summary.get("sma_data")
     ema_data = summary.get("ema_data")
     macd_data = summary.get("macd_data")
+    rsi_data = summary.get("rsi_data")
 
     # Format change color
     change_color = "#2ECC8F" if price_stats["change"] >= 0 else "#FF5449"
@@ -327,6 +370,14 @@ def render_dashboard_html(summary: Dict[str, Any]) -> str:
                 signal_line = latest_macd.get("signal", 0)
                 histogram = macd_line - signal_line
                 indicator_info += f"<div class='info-item'><div class='info-label'>MACD</div><div class='info-value'>{histogram:.4f}</div></div>"
+
+    if rsi_data and rsi_data.get("results") and rsi_data["results"].get("values"):
+        rsi_values = rsi_data["results"]["values"]
+        if rsi_values:
+            latest_rsi = rsi_values[0]["value"] if isinstance(rsi_values[0], dict) else None
+            if latest_rsi:
+                rsi_color = "#2ECC8F" if latest_rsi < 30 else "#FF5449" if latest_rsi > 70 else "#E0A83B"
+                indicator_info += f"<div class='info-item'><div class='info-label'>RSI(14)</div><div class='info-value' style='color:{rsi_color}'>{latest_rsi:.1f}</div></div>"
 
     html = f"""
     <!DOCTYPE html>
