@@ -22,6 +22,26 @@ SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 
 
+def _load_dotenv():
+    """Load KEY=VALUE lines from a .env file next to this module into
+    os.environ (without overriding vars already set). Avoids needing a
+    python-dotenv dependency just for local credential storage."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.isfile(path):
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip().strip('"').strip("'")
+            os.environ.setdefault(key, value)
+
+
+_load_dotenv()
+
+
 def send_email(subject, text_body, html_body=None, to_addr=None):
     """Send an email via Gmail SMTP. Raises RuntimeError if credentials are
     missing, or smtplib.SMTPException on send failure."""
