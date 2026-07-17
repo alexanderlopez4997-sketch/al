@@ -2127,6 +2127,21 @@ def discord_report(subject, text_body):
     except Exception as e:
         print(rd(f"\ndiscord post failed: {e}"))
 
+
+def discord_conviction_alert(ticker, verdict_label, conviction_pct, score, threshold):
+    """Fire a per-ticker Discord ping when conviction_pct clears threshold —
+    a no-op silently below it. Uses the same discord_notify.py webhook path
+    as discord_report(), just gated per-ticker instead of one full report."""
+    if conviction_pct < threshold:
+        return
+    import discord_notify
+    message = f"QUANT ENGINE ALERT\n**{ticker}** | Signal: **{verdict_label}** | Conviction: **{conviction_pct}%** ({score:+.0f})"
+    try:
+        discord_notify.send_discord(message)
+        print(dim(f"  -> discord alert: {ticker} conviction {conviction_pct}%"))
+    except Exception as e:
+        print(rd(f"  -> discord alert failed for {ticker}: {e}"))
+
 # ------------------------------------------------------------------ main ---
 def main():
     ap = argparse.ArgumentParser(description="Quant engine — scores stocks, issues buy/hold/avoid verdicts.")
@@ -2147,6 +2162,11 @@ def main():
     ap.add_argument("--discord", action="store_true",
                      help="post the --alerts or --morning report to Discord "
                           "(requires DISCORD_WEBHOOK_URL env var)")
+    ap.add_argument("--discord-alerts", action="store_true",
+                     help="post a per-ticker Discord alert whenever conviction "
+                          "clears --discord-threshold (requires DISCORD_WEBHOOK_URL env var)")
+    ap.add_argument("--discord-threshold", type=float, default=80.0,
+                     help="conviction %% (0-100) required to fire --discord-alerts (default 80)")
     ap.add_argument("--positions", action="store_true", help="show open/closed positions with live P&L")
     ap.add_argument("--add-position", nargs=2, metavar=("TICKER", "ENTRY_PRICE"), help="add a new position (ticker, entry_price)")
     ap.add_argument("--close-position", nargs=2, metavar=("TICKER", "EXIT_PRICE"), help="close a position (ticker, exit_price)")
@@ -2197,6 +2217,10 @@ def main():
             else:
                 res = analyze(t, df, args.interval, weights)
             results.append((res, opt))
+            if args.discord_alerts:
+                m = res["stage_5_metrics"] if args.pipeline else res
+                discord_conviction_alert(t, m["verdict"]["label"], m["conviction"],
+                                          m["score"], args.discord_threshold)
         except Exception as e:
             errors.append(f"{t}: {e}")
 

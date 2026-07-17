@@ -71,6 +71,13 @@ python3 quant_engine.py AAPL MSFT NVDA TSLA --alerts --discord
 python3 quant_engine.py AAPL MSFT NVDA TSLA --morning --discord
 ```
 
+Or fire a per-ticker alert the moment its conviction score clears a threshold
+(instead of waiting for a full `--alerts`/`--morning` report):
+
+```bash
+python3 quant_engine.py AAPL MSFT NVDA TSLA --discord-alerts --discord-threshold 80
+```
+
 ## Example Output
 
 ### Dashboard (Multi-Stock View)
