@@ -45,7 +45,7 @@ def signed(x, fmt="{:+.2f}"):
     s = fmt.format(x)
     return gr(s) if x >= 0 else rd(s)
 
-FINNHUB_DEFAULT_KEY = "d930h31r01qpou38ope0d930h31r01qpou38opeg"
+FINNHUB_DEFAULT_KEY = os.environ.get("FINNHUB_KEY", "")
 FACTORS = ["Direction", "Momentum", "Volume", "MeanRev"]
 BASE_WEIGHTS = {"Direction": 0.38, "Momentum": 0.27, "Volume": 0.20, "MeanRev": 0.15}
 
