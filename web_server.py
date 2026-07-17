@@ -88,6 +88,9 @@ def _full_analyze(sym, demo, optimize=False):
     return {"ticker": sym, "score": round(res["score"]), "verdict": res["verdict"]["label"],
             "tone": res["verdict"]["tone"], "last": round(res["last"], 2), "chg": round(res["chg"], 2),
             "regime": (res.get("regime") or {}).get("regime", "unknown"),
+            "edge_status": res.get("verdict", {}).get("edge_status", "ACTIVE"),
+            "information_ratio": round(res.get("verdict", {}).get("information_ratio", 0.0), 3),
+            "win_rate": round(res.get("verdict", {}).get("win_rate", 0.5), 3),
             "report": _seg_html(segs)}
 
 
