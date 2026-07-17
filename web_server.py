@@ -86,6 +86,7 @@ def _full_analyze(sym, demo, optimize=False):
     segs = g.build_report_segments(res, res.get("opt"), 10000.0, 1.0)
     return {"ticker": sym, "score": round(res["score"]), "verdict": res["verdict"]["label"],
             "tone": res["verdict"]["tone"], "last": round(res["last"], 2), "chg": round(res["chg"], 2),
+            "regime": (res.get("regime") or {}).get("regime", "unknown"),
             "report": _seg_html(segs)}
 
 
@@ -401,6 +402,9 @@ PAGE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <script>
 const $=id=>document.getElementById(id); let V='dash', chart=null, timer=null;
 function demo(){return $('demo').checked?1:0} function wl(){return encodeURIComponent($('wl').value)}
+function renderVerdict(data){const r=(data.regime||'').toLowerCase();
+ const color=r==='bull'?'var(--buy)':r==='bear'?'var(--sell)':'var(--amber)';
+ return '<span class="pill" style="background-color:'+color+';color:#04140c">'+(data.regime||'—').toUpperCase()+'</span>';}
 function clock(){const n=new Date(new Date().toLocaleString('en-US',{timeZone:'America/New_York'}));
  $('clock').textContent=n.toTimeString().slice(0,8)+' ET';const m=n.getHours()*60+n.getMinutes();let s='CLOSED';
  if(n.getDay()>0&&n.getDay()<6){if(m>=240&&m<570)s='PRE-MARKET';else if(m>=570&&m<960)s='MARKET OPEN';else if(m>=960&&m<1200)s='AFTER HOURS';}
@@ -434,6 +438,7 @@ async function go(){const t=$('tk').value.trim().toUpperCase()||'NVDA';
   const cls=a.tone==='good'?'good':a.tone==='bad'?'bad':'neutral',cc=a.chg>=0?'var(--buy)':'var(--sell)';
   $('main').innerHTML='<div class="hd"><span class="tk">'+a.ticker+'</span>'
    +'<span class="px">'+a.last.toFixed(2)+' <span style="color:'+cc+'">'+(a.chg>=0?'+':'')+a.chg+'%</span></span>'
+   +renderVerdict(a)
    +'<span class="badge '+cls+'">'+a.verdict+'</span></div>'
    +'<div class="card"><div id="chart"></div></div><div class="card report">'+a.report+'</div>';
   drawChart(o.bars);

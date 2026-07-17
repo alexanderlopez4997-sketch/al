@@ -2034,7 +2034,8 @@ def main():
                 print()
     elif results:
         results_list = [r for r, _ in results]
-        update_positions_live(results_list)
+        if not args.demo:
+            update_positions_live(results_list)
         if args.alerts:
             portfolio_alerts(results_list)
         elif args.dashboard:
