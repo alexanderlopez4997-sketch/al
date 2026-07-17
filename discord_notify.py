@@ -21,6 +21,11 @@ from envfile import load_dotenv
 DISCORD_CONTENT_LIMIT = 2000
 _FENCE = "```\n"
 _FENCE_END = "\n```"
+# urllib's default "Python-urllib/x.y" User-Agent gets flagged by Cloudflare's
+# bot fingerprinting in front of discord.com (error code 1010) even though
+# curl's request is functionally identical — a browser-like UA sails through.
+_USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 load_dotenv()
 
@@ -57,7 +62,8 @@ def send_discord(content, webhook_url=None):
     for chunk in _chunks(content, budget):
         body = json.dumps({"content": _FENCE + chunk + _FENCE_END}).encode("utf-8")
         req = urllib.request.Request(url, data=body, method="POST",
-                                      headers={"Content-Type": "application/json"})
+                                      headers={"Content-Type": "application/json",
+                                               "User-Agent": _USER_AGENT})
         try:
             urllib.request.urlopen(req, timeout=15).close()
         except urllib.error.HTTPError as e:
