@@ -23,6 +23,7 @@ optimized weights can overfit (compare train vs unseen-test Sharpe). Past
 patterns do not predict future returns.
 """
 import argparse
+import asyncio
 import hashlib
 import json
 import math
@@ -1577,6 +1578,90 @@ def analyze(ticker, df, interval, weights=None, d=None, F=None, calibrate=False)
             "whale_activity": whale_score(d),
             "regime": regime, "factor_correlation": corr_analysis, "information_ratio": ir,
             "edge_status": edge_status, "edge_override": edge_override}
+
+# ---------------------------------------------------------- service API ---
+# Everything below is the UI-agnostic surface a front end (TUI, web, GUI)
+# should call. It takes plain arguments (ticker, interval) and returns
+# plain-Python primitives — no DataFrames, no numpy scalars — so callers
+# never need to import pandas/numpy just to render a result.
+
+def default_period(interval, day_trade=False):
+    """Lookback long enough for stable signals without exceeding yfinance's
+    per-interval history cap."""
+    if interval == "1d":
+        return "6mo"
+    if interval == "1m":
+        return "2d"
+    if interval in ("2m", "5m"):
+        return "3d" if day_trade else "5d"
+    return "3d" if day_trade else "1mo"
+
+def summarize_analysis(res):
+    """Flatten an analyze() result into JSON-safe primitives for display."""
+    bt = res["bt"]
+    vrd = res["verdict"]
+    conf = res["confirmation"]
+    regime = res["regime"]
+    wr = bt.get("winrate", float("nan"))
+    return {
+        "ticker": res["ticker"],
+        "price": round(res["last"], 4),
+        "chg_pct": round(res["chg"], 3),
+        "score": round(res["score"], 2),
+        "verdict_label": vrd["label"],
+        "verdict_tone": vrd["tone"],
+        "conviction_pct": res["conviction"],
+        "regime": regime.get("regime", "unknown"),
+        "regime_confidence": round(regime.get("confidence", 0.0), 3),
+        "atr_pct": round(res["atr_pct"], 3),
+        "ann_vol": round(res["ann_vol"], 3),
+        "maxdd_pct": round(res["maxdd"], 3),
+        "edge_status": res["edge_status"],
+        "ineligible": bool(res["ineligible"]),
+        "n_bars": int(res["n_bars"]),
+        "backtest_sharpe": round(bt.get("sharpe", 0.0), 3),
+        "backtest_winrate_pct": (round(wr * 100, 1) if not math.isnan(wr) else None),
+        "backtest_trades": int(bt.get("trades", 0)),
+        "confirmation_level": conf["level"],
+        "confirmation_passed": conf["passed"],
+        "confirmation_total": conf["total"],
+    }
+
+class Engine:
+    """Service layer: fetches data and runs the factor/backtest pipeline,
+    returning plain-Python dicts. UI-agnostic — safe to call from a TUI,
+    a web backend, or a script. Blocking I/O (yfinance) and CPU-bound work
+    (pandas/backtest) run in a worker thread so async callers never block
+    their event loop."""
+
+    def __init__(self, day_trade=False, demo=False):
+        self.day_trade = day_trade
+        self.demo = demo   # synthetic data, no network — for offline dev/testing
+
+    async def analyze(self, ticker, interval="1d", period=None):
+        """Analyze one ticker. Returns a summary dict (see summarize_analysis)."""
+        return await asyncio.to_thread(self._analyze_sync, ticker, interval, period)
+
+    def _analyze_sync(self, ticker, interval, period):
+        ticker = ticker.strip().upper()
+        period = period or default_period(interval, self.day_trade)
+        df = demo_data(ticker) if self.demo else fetch(ticker, period, interval)
+        res = analyze(ticker, df, interval, calibrate=True)
+        return summarize_analysis(res)
+
+    async def scan(self, tickers, interval="1d", period=None):
+        """Analyze several tickers concurrently. Returns summaries sorted by
+        score (best signal first); failures are returned as {ticker, error}
+        instead of raising, so one bad symbol doesn't sink the whole scan."""
+        async def one(t):
+            try:
+                return await self.analyze(t, interval, period)
+            except Exception as e:
+                return {"ticker": t.strip().upper(), "error": str(e)}
+
+        results = await asyncio.gather(*(one(t) for t in tickers))
+        results.sort(key=lambda r: r.get("score", float("-inf")), reverse=True)
+        return results
 
 # -------------------------------------------------------------- reports ---
 def reasons(row):
