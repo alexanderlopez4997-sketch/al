@@ -30,6 +30,7 @@ import afterhours as ah
 import morning as mb
 import trackrecord as tr
 import websocket_client as wsc
+import aapl_dashboard as ad
 
 PORT = 8787
 TAG = {"txt": "#C9D6E2", "dim": "#6B7E92", "buy": "#2ECC8F", "sell": "#FF5449",
@@ -296,9 +297,34 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(json.dumps({"html": g.build_screener_html(results, [], "1d", demo, "none")}))
             if u.path == "/api/diagnostics":
                 return self._send(json.dumps(_diagnostics_json(tks)))
+            if u.path == "/dashboard/aapl":
+                result = _aapl_dashboard_html()
+                return self._send(result["html"], "text/html; charset=utf-8")
         except Exception as e:
             return self._send(json.dumps({"error": str(e)}))
         self._send("not found", "text/plain")
+
+
+# ----------------------------------------------------------- aapl dashboard ---
+def _aapl_dashboard_html(data_points=None):
+    """Generate AAPL dashboard HTML with provided data."""
+    if data_points is None:
+        data_points = [
+            {"timestamp": 1784174400000, "value": 301.6571999999999},
+            {"timestamp": 1784088000000, "value": 300.52859999999987},
+            {"timestamp": 1784001600000, "value": 299.58139999999986},
+            {"timestamp": 1783915200000, "value": 298.7111999999999},
+            {"timestamp": 1783656000000, "value": 297.7683999999999},
+            {"timestamp": 1783569600000, "value": 296.87619999999987},
+            {"timestamp": 1783483200000, "value": 295.9039999999999},
+            {"timestamp": 1783396800000, "value": 295.0573999999999},
+            {"timestamp": 1783310400000, "value": 294.3127999999999},
+            {"timestamp": 1782964800000, "value": 293.5229999999999},
+        ]
+    processor = ad.AAPLDataProcessor(data_points)
+    summary = processor.generate_summary()
+    html = ad.render_dashboard_html(summary)
+    return {"html": html}
 
 
 def _feeds():
