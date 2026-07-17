@@ -58,4 +58,8 @@ def send_discord(content, webhook_url=None):
         body = json.dumps({"content": _FENCE + chunk + _FENCE_END}).encode("utf-8")
         req = urllib.request.Request(url, data=body, method="POST",
                                       headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=15).close()
+        try:
+            urllib.request.urlopen(req, timeout=15).close()
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")
+            raise urllib.error.HTTPError(e.url, e.code, f"{e.reason}: {detail}", e.headers, e.fp)
