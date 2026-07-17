@@ -26,6 +26,8 @@ import trackrecord as tr
 import orderflow as of
 import edgar
 import leaderboard as lb
+import sale_conditions as sc
+import exchanges as ex
 from meridian_cache import MeridianCache
 
 _PASS = _FAIL = 0
@@ -313,6 +315,46 @@ check("cache columns correct", list(got.columns) == ["Open", "High", "Low", "Clo
 c.save("CACHE", cdf, "6mo")  # re-save must not raise (upsert)
 check("cache upsert no crash", True)
 os.remove(_dbtmp)
+
+# ------------------------------------------------------------- sale_conditions
+section("sale_conditions")
+check("bundled snapshot loads", len(sc.DEFAULT_CONDITIONS) == 10)
+check("index covers CTA/UTP/FINRA_TDDS tapes", set(sc.DEFAULT_INDEX) == {"CTA", "UTP", "FINRA_TDDS"})
+check("Average Price Trade suppresses high/low+open/close", sc.classify_trade(["W"], "UTP") == {
+    "updates_high_low": False, "updates_open_close": False, "updates_volume": True})
+check("Cash Sale suppresses high/low+open/close on CTA too", sc.classify_trade(["C"], "CTA") == {
+    "updates_high_low": False, "updates_open_close": False, "updates_volume": True})
+check("Cross Trade updates everything", sc.classify_trade(["X"], "UTP") == {
+    "updates_high_low": True, "updates_open_close": True, "updates_volume": True})
+check("no condition codes updates everything", all(sc.classify_trade([], "UTP").values()))
+check("unrecognized code updates everything", all(sc.classify_trade(["ZZ"], "UTP").values()))
+check("one suppressing code among several suppresses the field", sc.classify_trade(["X", "C"], "CTA")["updates_high_low"] is False)
+check("Derivatively Priced suppresses only open/close", sc.classify_trade(["4"], "UTP") == {
+    "updates_high_low": True, "updates_open_close": False, "updates_volume": True})
+check("get_condition finds Bunched Trade on UTP", sc.get_condition("B", "UTP").name == "Bunched Trade")
+check("get_condition distinguishes tapes for same code", sc.get_condition("B", "CTA").name == "Average Price Trade")
+check("get_condition None for unknown code", sc.get_condition("ZZ", "UTP") is None)
+check("legacy flag parsed", sc.get_condition("I", "CTA").legacy is True)
+check("non-legacy defaults False", sc.get_condition("X", "UTP").legacy is False)
+check("fetch_all_conditions returns None without an API key", sc.fetch_all_conditions(api_key="") is None)
+_parsed = sc.parse_conditions([{"id": 99, "name": "Test Cond", "asset_class": "stocks",
+                                 "sip_mapping": {"UTP": "Z"}, "update_rules": {}, "data_types": ["trade"]}])
+check("parse_conditions round-trips fields", _parsed[0].id == 99 and _parsed[0].sip_mapping == {"UTP": "Z"})
+check("rules_for defaults all-True for missing scope", all(_parsed[0].rules_for("consolidated").values()))
+
+# ------------------------------------------------------------------ exchanges
+section("exchanges")
+check("bundled snapshot loads", len(ex.DEFAULT_EXCHANGES) == 27)
+check("participant_id T resolves to Nasdaq", ex.get_exchange("T").name == "Nasdaq" and ex.get_exchange("T").mic == "XNAS")
+check("participant_id N resolves to NYSE", ex.get_exchange("N").mic == "XNYS")
+check("unknown participant_id returns None", ex.get_exchange("ZZ") is None)
+check("rows without participant_id excluded from participant index", "OTC Equity Security" not in
+      {v.name for v in ex.DEFAULT_PARTICIPANT_INDEX.values()})
+check("mic index resolves Nasdaq operating_mic", ex.DEFAULT_MIC_INDEX["XNAS"].name == "Nasdaq")
+check("fetch_all_exchanges returns None without an API key", ex.fetch_all_exchanges(api_key="") is None)
+_pex = ex.parse_exchanges([{"id": 999, "type": "exchange", "asset_class": "stocks", "locale": "us",
+                             "name": "Test Exch", "operating_mic": "TEST", "mic": "TEST", "participant_id": "Q"}])
+check("parse_exchanges round-trips fields", _pex[0].id == 999 and _pex[0].participant_id == "Q")
 
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")
