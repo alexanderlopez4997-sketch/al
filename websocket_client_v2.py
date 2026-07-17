@@ -23,10 +23,15 @@ except ImportError:
 
 try:
     from massive import WebSocketClient
-    from massive.websocket.models import Feed, Market, WebSocketMessage
+    from massive.websocket.models import Feed, Market
+    try:
+        from massive.websocket.models import WebSocketMessage
+    except ImportError:
+        WebSocketMessage = Any  # Fallback for older versions
     HAS_MASSIVE = True
 except ImportError:
     HAS_MASSIVE = False
+    WebSocketMessage = Any  # Type stub when massive not installed
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -197,8 +202,8 @@ class DiagnosticsCalculator:
             # Convert prices to returns
             returns = np.diff(price_matrix, axis=1) / price_matrix[:, :-1]
 
-            # Vectorized correlation matrix
-            corr_matrix = np.corrcoef(returns)
+            # Vectorized correlation matrix (numpy 2.0 compatible)
+            corr_matrix = np.corrcoef(np.asarray(returns))
 
             # Extract pairs
             symbols = list(range(price_matrix.shape[0]))
