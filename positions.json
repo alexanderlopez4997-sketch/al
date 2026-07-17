@@ -1,33 +1,4 @@
 {
-  "positions": [
-    {
-      "ticker": "SOFI",
-      "entry_price": 117.44562114489342,
-      "entry_time": "2026-07-17T04:55:17.413349",
-      "entry_conviction": 75,
-      "shares": 219,
-      "status": "open",
-      "current_price": 117.44562114489342,
-      "current_conviction": 75,
-      "pnl": 0.0,
-      "pnl_pct": 0.0,
-      "conviction_change": 0,
-      "signal": "STRONG BUY signal"
-    },
-    {
-      "ticker": "NVDA",
-      "entry_price": 282.7451840274032,
-      "entry_time": "2026-07-17T04:55:17.413391",
-      "entry_conviction": 75,
-      "shares": 50,
-      "status": "open",
-      "current_price": 282.7451840274032,
-      "current_conviction": 75,
-      "pnl": 0.0,
-      "pnl_pct": 0.0,
-      "conviction_change": 0,
-      "signal": "BUY signal"
-    }
-  ],
+  "positions": [],
   "closed": []
 }
