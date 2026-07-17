@@ -54,6 +54,23 @@ python3 quant_engine.py AAPL MSFT NVDA TSLA --morning --email
 Mail is sent via `mailer.py` over Gmail's SMTP relay (`smtplib`) — no OAuth
 setup needed, just the app password.
 
+Credentials for either can also live in a local `.env` file (copy
+`.env.example` to `.env`; it's git-ignored) instead of shell exports.
+
+## Discord Alerts
+
+Post `--alerts` or `--morning` reports to a Discord channel via an incoming
+webhook — simpler than Gmail, no account credentials involved:
+
+```bash
+# one-time setup — Discord: Server Settings -> Integrations -> Webhooks ->
+# New Webhook -> Copy Webhook URL
+export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+
+python3 quant_engine.py AAPL MSFT NVDA TSLA --alerts --discord
+python3 quant_engine.py AAPL MSFT NVDA TSLA --morning --discord
+```
+
 ## Example Output
 
 ### Dashboard (Multi-Stock View)

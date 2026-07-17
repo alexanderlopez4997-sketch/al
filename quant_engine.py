@@ -2116,6 +2116,17 @@ def email_report(subject, text_body):
     except Exception as e:
         print(rd(f"\nemail failed: {e}"))
 
+
+def discord_report(subject, text_body):
+    """Send text_body to Discord via discord_notify.send_discord(), printing
+    a status line either way."""
+    import discord_notify
+    try:
+        discord_notify.send_discord(f"{subject}\n{text_body}")
+        print(dim(f"\nposted '{subject}' to Discord"))
+    except Exception as e:
+        print(rd(f"\ndiscord post failed: {e}"))
+
 # ------------------------------------------------------------------ main ---
 def main():
     ap = argparse.ArgumentParser(description="Quant engine — scores stocks, issues buy/hold/avoid verdicts.")
@@ -2133,6 +2144,9 @@ def main():
     ap.add_argument("--email", action="store_true",
                      help="email the --alerts or --morning report via Gmail "
                           "(requires GMAIL_ADDRESS + GMAIL_APP_PASSWORD env vars)")
+    ap.add_argument("--discord", action="store_true",
+                     help="post the --alerts or --morning report to Discord "
+                          "(requires DISCORD_WEBHOOK_URL env var)")
     ap.add_argument("--positions", action="store_true", help="show open/closed positions with live P&L")
     ap.add_argument("--add-position", nargs=2, metavar=("TICKER", "ENTRY_PRICE"), help="add a new position (ticker, entry_price)")
     ap.add_argument("--close-position", nargs=2, metavar=("TICKER", "EXIT_PRICE"), help="close a position (ticker, exit_price)")
@@ -2208,12 +2222,16 @@ def main():
             portfolio_alerts(results_list)
             if args.email:
                 email_report("Portfolio Alerts", format_portfolio_alerts_text(results_list))
+            if args.discord:
+                discord_report("Portfolio Alerts", format_portfolio_alerts_text(results_list))
         elif args.morning:
             briefs = build_morning_briefs(results_list, args.finnhub_key)
             text = format_morning_brief_text(briefs)
             print(text)
             if args.email:
                 email_report("Morning Brief", text + "\n\n" + DISCLAIMER)
+            if args.discord:
+                discord_report("Morning Brief", text + "\n\n" + DISCLAIMER)
         elif args.dashboard:
             dashboard(results_list)
         else:
