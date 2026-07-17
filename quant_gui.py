@@ -1907,8 +1907,9 @@ class App:
             scored = tr.score(lambda t: data.get(t), horizon)
             summ = tr.summary(scored, horizon)
             self._post(self._render_trackrecord, summ, scored)
-        except Exception as e:
-            self._post(lambda: (self.s_status.configure(text=f"Track Record failed: {e}", fg=SELL),
+        except Exception as ex:
+            err_msg = str(ex)
+            self._post(lambda: (self.s_status.configure(text=f"Track Record failed: {err_msg}", fg=SELL),
                                 self.s_tr_btn.configure(state="normal")))
 
     def _render_trackrecord(self, summ, scored):
@@ -1988,8 +1989,9 @@ class App:
             with ThreadPoolExecutor(max_workers=8) as ex:
                 list(ex.map(one, tickers))
             self._post(self._render_morning, briefs)
-        except Exception as e:
-            self._post(lambda: (self.s_status.configure(text=f"Morning Brief failed: {e}", fg=SELL),
+        except Exception as exc:
+            err_msg = str(exc)
+            self._post(lambda: (self.s_status.configure(text=f"Morning Brief failed: {err_msg}", fg=SELL),
                                 self.s_mb_btn.configure(state="normal")))
 
     def _render_morning(self, briefs):
@@ -2089,8 +2091,9 @@ class App:
                 with ThreadPoolExecutor(max_workers=5) as ex:
                     list(ex.map(flow, [t for t, r in reads.items() if r["flag"]]))
             self._post(self._render_afterhours, reads)
-        except Exception as e:
-            self._post(lambda: (self.s_status.configure(text=f"After-Hours failed: {e}", fg=SELL),
+        except Exception as exc:
+            err_msg = str(exc)
+            self._post(lambda: (self.s_status.configure(text=f"After-Hours failed: {err_msg}", fg=SELL),
                                 self.s_ah_btn.configure(state="normal")))
 
     def _render_afterhours(self, reads):
