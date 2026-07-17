@@ -2011,6 +2011,111 @@ DISCLAIMER = ("Rules-based technical signals on historical data — not financia
               "Backtest ignores fees/slippage and is in-sample; optimized weights can "
               "overfit. Past patterns do not predict future returns.")
 
+# ------------------------------------------------------------- email text ---
+def format_portfolio_alerts_text(results):
+    """Plain-text (no ANSI) rendering of portfolio_alerts(), for email."""
+    categorized = categorize_portfolio(results)
+    lines = ["PORTFOLIO ALERTS - BUY CANDIDATES & RISKS", "=" * 70]
+
+    buy = categorized["buy"]
+    lines.append(f"\nGREEN - BUY CANDIDATES ({len(buy)} stocks)" if buy else
+                 "\nGREEN - BUY CANDIDATES (none)")
+    for r in buy:
+        lines.append(f"  {r['ticker']:<8} {r['score']:+.0f} {r['verdict']['label']}")
+        insiders = r.get("insiders", {})
+        if insiders and insiders.get("buy_usd", 0) > 0:
+            lines.append(f"    Insider buy: ${insiders['buy_usd']/1e6:.1f}M")
+        if r.get("macro_signal", {}).get("signal", 0) > 0.4:
+            lines.append(f"    News tone: {r['macro_signal']['signal']:+.2f}")
+        lines.append(f"    Risk: {r.get('red_flags', {}).get('risk_level', 'MEDIUM')}")
+
+    risk = categorized["risk"]
+    lines.append(f"\nRED - RISK / AVOID ({len(risk)} stocks)" if risk else
+                 "\nRED - RISK / AVOID (none)")
+    for r in risk:
+        lines.append(f"  {r['ticker']:<8} {r['score']:+.0f} {r['verdict']['label']}")
+        red_flags = r.get("red_flags", {})
+        for flag in red_flags.get("flags", [])[:3]:
+            lines.append(f"    - {flag}")
+        lines.append(f"    Risk: {red_flags.get('risk_level', 'UNKNOWN')}")
+
+    neutral = categorized["neutral"]
+    neutral_tickers = ", ".join(r["ticker"] for r in neutral[:10])
+    remaining = f" +{len(neutral)-10} more" if len(neutral) > 10 else ""
+    lines.append(f"\nYELLOW - NEUTRAL ({len(neutral)} stocks)")
+    lines.append(f"  {neutral_tickers}{remaining}")
+
+    lines.append("\n" + DISCLAIMER)
+    return "\n".join(lines)
+
+
+def build_morning_briefs(results, finnhub_key):
+    """Enrich already-analyzed results with overnight signals (after-hours
+    move, insider flow, SEC filings, news sentiment) and rank by catalyst
+    score. Returns a list of morning.catalyst_score() dicts, richest first."""
+    import morning as mb
+    import edgar
+    import sentiment_engine as se
+
+    akey = os.environ.get("ALPACA_API_KEY")
+    asec = os.environ.get("ALPACA_API_SECRET")
+    avkey = os.environ.get("ALPHA_VANTAGE_KEY")
+
+    briefs = []
+    for r in results:
+        t, reg = r["ticker"], r["last"]
+        ahpx = alpaca_latest_trade(t, akey, asec) if (akey and asec) else None
+        ah_chg = (ahpx / reg - 1) * 100 if ahpx else 0.0
+        ins = insider_signal(finnhub_insiders(t, finnhub_key)) if finnhub_key else None
+        try:
+            fil = edgar.recent_filings(t, days=2)
+        except Exception:
+            fil = []
+        sen = None
+        if finnhub_key:
+            try:
+                sen = se.news_sentiment(t, finnhub_key, avkey)
+            except Exception:
+                sen = None
+        b = mb.catalyst_score(r["score"], ah_chg, ins, fil, sen, r.get("whale_activity"))
+        b.update({"ticker": t, "ah_chg": ah_chg, "tech": r["verdict"]["label"]})
+        briefs.append(b)
+    return sorted(briefs, key=lambda b: -b["score"])
+
+
+def format_morning_brief_text(briefs):
+    """Plain-text rendering of a morning brief, for terminal or email."""
+    lines = ["MORNING BRIEF - OVERNIGHT CATALYST SCORE", "=" * 70]
+    buys = [b for b in briefs if b["verdict"] == "BUY candidate"]
+    risks = [b for b in briefs if b["verdict"] == "RISK / avoid"]
+    watch = [b for b in briefs if b["verdict"] not in ("BUY candidate", "RISK / avoid")]
+
+    def block(title, items):
+        out = [f"\n{title} ({len(items)})" if items else f"\n{title} (none)"]
+        for b in items:
+            out.append(f"  {b['ticker']:<8} {b['score']:+d}  chart:{b['tech']}  "
+                        f"ah:{b['ah_chg']:+.1f}%")
+            for text, direction in b["reasons"][:4]:
+                mark = "UP" if direction > 0 else "DOWN" if direction < 0 else "-"
+                out.append(f"    {mark} {text}")
+        return out
+
+    lines += block("BUY CANDIDATES", buys)
+    lines += block("RISK / AVOID", risks)
+    lines += block("WATCH", watch)
+    return "\n".join(lines)
+
+
+def email_report(subject, text_body):
+    """Send text_body to the user's Gmail via mailer.send_email(), printing
+    a status line either way."""
+    import mailer
+    try:
+        recipient = mailer.send_email(subject, text_body)
+        print(dim(f"\nemailed '{subject}' to {recipient}"))
+    except Exception as e:
+        print(rd(f"\nemail failed: {e}"))
+
 # ------------------------------------------------------------------ main ---
 def main():
     ap = argparse.ArgumentParser(description="Quant engine — scores stocks, issues buy/hold/avoid verdicts.")
@@ -2024,6 +2129,10 @@ def main():
     ap.add_argument("--pipeline", action="store_true", help="show modular pipeline view (stages 1-5)")
     ap.add_argument("--dashboard", action="store_true", help="show portfolio dashboard view (multi-stock)")
     ap.add_argument("--alerts", action="store_true", help="show portfolio alerts (BUY/RISK categorization)")
+    ap.add_argument("--morning", action="store_true", help="show morning brief (overnight catalyst score ranking)")
+    ap.add_argument("--email", action="store_true",
+                     help="email the --alerts or --morning report via Gmail "
+                          "(requires GMAIL_ADDRESS + GMAIL_APP_PASSWORD env vars)")
     ap.add_argument("--positions", action="store_true", help="show open/closed positions with live P&L")
     ap.add_argument("--add-position", nargs=2, metavar=("TICKER", "ENTRY_PRICE"), help="add a new position (ticker, entry_price)")
     ap.add_argument("--close-position", nargs=2, metavar=("TICKER", "EXIT_PRICE"), help="close a position (ticker, exit_price)")
@@ -2097,6 +2206,14 @@ def main():
             update_positions_live(results_list)
         if args.alerts:
             portfolio_alerts(results_list)
+            if args.email:
+                email_report("Portfolio Alerts", format_portfolio_alerts_text(results_list))
+        elif args.morning:
+            briefs = build_morning_briefs(results_list, args.finnhub_key)
+            text = format_morning_brief_text(briefs)
+            print(text)
+            if args.email:
+                email_report("Morning Brief", text + "\n\n" + DISCLAIMER)
         elif args.dashboard:
             dashboard(results_list)
         else:

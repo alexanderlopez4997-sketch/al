@@ -35,6 +35,25 @@ python3 quant_engine.py --close-position AAPL 320    # Exit
 python3 quant_engine.py --positions                  # Show all
 ```
 
+## Email Alerts (Gmail)
+
+Send `--alerts` or `--morning` reports to your inbox instead of (or in addition
+to) reading them off the terminal:
+
+```bash
+# one-time setup — Gmail App Password requires 2-Step Verification:
+# https://myaccount.google.com/apppasswords
+export GMAIL_ADDRESS="you@gmail.com"
+export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
+# optional: export GMAIL_TO="someone-else@example.com" (defaults to GMAIL_ADDRESS)
+
+python3 quant_engine.py AAPL MSFT NVDA TSLA --alerts --email
+python3 quant_engine.py AAPL MSFT NVDA TSLA --morning --email
+```
+
+Mail is sent via `mailer.py` over Gmail's SMTP relay (`smtplib`) — no OAuth
+setup needed, just the app password.
+
 ## Example Output
 
 ### Dashboard (Multi-Stock View)
