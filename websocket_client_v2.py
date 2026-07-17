@@ -14,6 +14,8 @@ from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass, asdict
 import numpy as np
 
+import sale_conditions
+
 # Optional: load environment variables
 try:
     from dotenv import load_dotenv
@@ -69,6 +71,37 @@ class AggregateBar:
 
 
 @dataclass
+class Trade:
+    """Single tick-level trade from WebSocket, with its raw sale-condition ids."""
+    symbol: str
+    price: float
+    size: int
+    conditions: List[int]
+    timestamp: int
+    exchange: Optional[int] = None
+
+    @classmethod
+    def from_message(cls, msg: Any) -> Optional['Trade']:
+        """Parse a raw trade ('T.*') WebSocket message to a Trade."""
+        try:
+            symbol = getattr(msg, 'symbol', None) or getattr(msg, 'sym', '')
+            conditions = getattr(msg, 'conditions', None)
+            if conditions is None:
+                conditions = getattr(msg, 'c', None) or []
+            return cls(
+                symbol=str(symbol).upper(),
+                price=float(getattr(msg, 'price', getattr(msg, 'p', 0))),
+                size=int(getattr(msg, 'size', getattr(msg, 's', 0))),
+                conditions=[int(c) for c in conditions],
+                timestamp=int(getattr(msg, 'timestamp', getattr(msg, 't', 0))),
+                exchange=getattr(msg, 'exchange', getattr(msg, 'x', None)),
+            )
+        except (ValueError, AttributeError, TypeError) as e:
+            logger.warning(f"Failed to parse trade message: {e}")
+            return None
+
+
+@dataclass
 class DiagnosticsSnapshot:
     """Immutable snapshot of diagnostics metrics."""
     status: str  # 'warming_up' | 'ready'
@@ -100,6 +133,42 @@ class AggregateBuffer:
         self.data: deque = deque(maxlen=max_size)
         self.lock = threading.RLock()
         self.last_update: Optional[datetime] = None
+        self._bar_open = False
+
+    def update_from_trade(self, trade: Trade, rules: Dict[str, bool]) -> None:
+        """Fold one trade into the in-progress bar, gated by its sale-condition
+        update rules (see sale_conditions.classify_trade_by_id). Excluded trades
+        (e.g. average-price, cash sale) still count toward volume by default but
+        never move high/low/open/close."""
+        if trade.price <= 0 or trade.size < 0:
+            logger.warning(f"Invalid trade data: {trade}")
+            return
+
+        with self.lock:
+            if not self._bar_open:
+                bar = AggregateBar(
+                    open=trade.price, high=trade.price, low=trade.price,
+                    close=trade.price, volume=0, timestamp=trade.timestamp
+                )
+                self.data.append(bar)
+                self._bar_open = True
+            else:
+                bar = self.data[-1]
+
+            if rules.get("updates_high_low", True):
+                bar.high = max(bar.high, trade.price)
+                bar.low = min(bar.low, trade.price)
+            if rules.get("updates_open_close", True):
+                bar.close = trade.price
+            if rules.get("updates_volume", True):
+                bar.volume += trade.size
+
+            self.last_update = datetime.now()
+
+    def close_bar(self) -> None:
+        """Seal the in-progress trade-built bar; the next trade starts a new one."""
+        with self.lock:
+            self._bar_open = False
 
     def add(self, bar: AggregateBar) -> None:
         """Add bar with validation and locking."""
@@ -113,6 +182,7 @@ class AggregateBuffer:
 
         with self.lock:
             self.data.append(bar)
+            self._bar_open = False  # server-finalized bar; next trade starts fresh
             self.last_update = datetime.now()
 
     def is_ready(self) -> bool:
@@ -146,6 +216,7 @@ class AggregateBuffer:
         with self.lock:
             self.data.clear()
             self.last_update = None
+            self._bar_open = False
 
 
 # ============================================================================
@@ -298,30 +369,27 @@ class DiagnosticsWebSocketClient:
         return True
 
     def _handle_messages(self, messages: List[WebSocketMessage]) -> None:
-        """Process WebSocket messages with error handling."""
+        """Process WebSocket messages with error handling. Routes trades ('T')
+        through sale-condition-aware bar building and aggregate bars ('AM')
+        straight into the buffer, as before."""
         if not messages:
             return
 
         for msg in messages:
             try:
-                # Validate
-                symbol = getattr(msg, 'symbol', '').upper() if hasattr(msg, 'symbol') else ''
+                symbol = getattr(msg, 'symbol', None) or getattr(msg, 'sym', '')
+                symbol = str(symbol).upper() if symbol else ''
                 if not self._validate_symbol(symbol):
                     continue
 
-                # Parse
-                bar = AggregateBar.from_message(msg)
-                if bar is None:
-                    continue
+                event = getattr(msg, 'event_type', None) or getattr(msg, 'ev', None)
 
-                # Store
-                self.buffers[symbol].add(bar)
-
-                # Optional: callback for debugging/monitoring
-                if self.message_handler:
-                    self.message_handler(symbol, bar)
-
-                logger.debug(f"Processed: {symbol} @ {bar.close}")
+                if event == 'T':
+                    trade = Trade.from_message(msg)
+                    if trade is not None:
+                        self._process_trade(symbol, trade)
+                else:
+                    self._process_aggregate(symbol, msg)
 
             except AttributeError as e:
                 logger.warning(f"Malformed message structure: {e}")
@@ -329,6 +397,28 @@ class DiagnosticsWebSocketClient:
                 logger.error(f"Missing required field: {e}")
             except Exception as e:
                 logger.error(f"Unexpected error in message handler: {e}", exc_info=True)
+
+    def _process_aggregate(self, symbol: str, msg: Any) -> None:
+        """Parse and store a server-finalized aggregate-minute ('AM') bar."""
+        bar = AggregateBar.from_message(msg)
+        if bar is None:
+            return
+        self.buffers[symbol].add(bar)
+        if self.message_handler:
+            self.message_handler(symbol, bar)
+        logger.debug(f"Processed: {symbol} @ {bar.close}")
+
+    def _process_trade(self, symbol: str, trade: Trade) -> None:
+        """Classify a trade's sale conditions and fold it into the buffer's
+        in-progress bar accordingly. Suppressed conditions (average-price,
+        cash sale, etc.) still count toward volume but never move high/low/close."""
+        rules = sale_conditions.classify_trade_by_id(trade.conditions)
+        self.buffers[symbol].update_from_trade(trade, rules)
+
+        if self.message_handler:
+            self.message_handler(symbol, trade)
+
+        logger.debug(f"Trade: {symbol} @ {trade.price} conditions={trade.conditions} rules={rules}")
 
     def _connect_loop(self) -> None:
         """Main WebSocket connection loop."""
@@ -349,10 +439,11 @@ class DiagnosticsWebSocketClient:
                 market=Market.Stocks
             )
 
-            # Subscribe to aggregate minute data
+            # Subscribe to aggregate minute data and raw trades (sale-condition classified)
             for sym in self.symbols:
                 self.client.subscribe(f"AM.{sym}")
-                logger.info(f"Subscribed to AM.{sym}")
+                self.client.subscribe(f"T.{sym}")
+                logger.info(f"Subscribed to AM.{sym}, T.{sym}")
 
             self.connected = True
             logger.info("WebSocket connected and subscribed")
@@ -374,34 +465,36 @@ class DiagnosticsWebSocketClient:
         """Generate realistic synthetic data for testing."""
         import random
 
+        # A handful of trades per synthetic bar go through the real sale-condition
+        # pipeline: mostly plain trades (update everything), occasionally an
+        # excluded condition (e.g. average-price, cash sale) that must move
+        # volume but never high/low/open/close.
+        NORMAL_CONDITIONS = [[], [9], [3]]        # none / Cross Trade / Automatic Execution
+        SUPPRESSING_CONDITIONS = [[2], [7]]       # Average Price Trade / Cash Sale
+
         def generate_data():
-            logger.info("Starting demo mode with synthetic data")
+            logger.info("Starting demo mode with synthetic trades")
 
             # Initialize with realistic prices
             prices = {sym: random.uniform(100, 500) for sym in self.symbols}
 
             while self.running:
                 for sym in self.symbols:
-                    # Random walk
-                    prices[sym] *= (1 + random.uniform(-0.02, 0.02))
+                    for _ in range(random.randint(5, 12)):
+                        prices[sym] *= (1 + random.uniform(-0.004, 0.004))
+                        conditions = random.choice(SUPPRESSING_CONDITIONS) if random.random() < 0.15 \
+                            else random.choice(NORMAL_CONDITIONS)
+                        trade = Trade(
+                            symbol=sym,
+                            price=round(prices[sym], 4),
+                            size=random.randint(100, 5000),
+                            conditions=conditions,
+                            timestamp=int(time.time() * 1000),
+                        )
+                        self._process_trade(sym, trade)
 
-                    # Generate realistic bar
-                    open_price = prices[sym]
-                    close_price = prices[sym] * (1 + random.uniform(-0.01, 0.01))
-                    high_price = max(open_price, close_price) * (1 + abs(random.uniform(-0.005, 0.005)))
-                    low_price = min(open_price, close_price) * (1 - abs(random.uniform(-0.005, 0.005)))
-
-                    bar = AggregateBar(
-                        open=open_price,
-                        high=high_price,
-                        low=low_price,
-                        close=close_price,
-                        volume=random.randint(1000000, 10000000),
-                        timestamp=int(time.time() * 1000)
-                    )
-
-                    self.buffers[sym].add(bar)
-                    logger.debug(f"Demo: {sym} @ {close_price:.2f}")
+                    self.buffers[sym].close_bar()
+                    logger.debug(f"Demo: {sym} @ {prices[sym]:.2f}")
 
                 time.sleep(1)  # Simulate 1-minute aggregates
 

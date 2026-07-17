@@ -66,8 +66,9 @@ def build_index(conditions: List[SaleCondition]) -> Dict[str, Dict[str, SaleCond
     return index
 
 
-def fetch_all_conditions(api_key=None, asset_class="stocks", base_url=None,
-                          timeout=10, max_pages=50):
+def fetch_all_conditions(
+    api_key=None, asset_class="stocks", base_url=None, timeout=10, max_pages=50
+):
     """Page through the live /v3/reference/conditions endpoint.
 
     Returns the full List[SaleCondition], or None if no key is configured
@@ -95,8 +96,10 @@ def fetch_all_conditions(api_key=None, asset_class="stocks", base_url=None,
         return None
 
 
-def classify_trade(condition_codes: List[str], tape: str, scope: str = "consolidated",
-                    index: Optional[Dict[str, Dict[str, SaleCondition]]] = None) -> Dict[str, bool]:
+def classify_trade(
+    condition_codes: List[str], tape: str, scope: str = "consolidated",
+    index: Optional[Dict[str, Dict[str, SaleCondition]]] = None
+) -> Dict[str, bool]:
     """Whether a trade's SIP condition codes let it update high/low, open/close, volume.
 
     A field is suppressed if ANY present, recognized condition marks it False
@@ -118,11 +121,47 @@ def classify_trade(condition_codes: List[str], tape: str, scope: str = "consolid
     return result
 
 
-def get_condition(code: str, tape: str, index: Optional[Dict[str, Dict[str, SaleCondition]]] = None) -> Optional[SaleCondition]:
+def get_condition(
+    code: str, tape: str, index: Optional[Dict[str, Dict[str, SaleCondition]]] = None
+) -> Optional[SaleCondition]:
     """Look up the SaleCondition for a single SIP code on a given tape."""
     if index is None:
         index = DEFAULT_INDEX
     return index.get(tape, {}).get(code)
+
+
+def build_id_index(conditions: List[SaleCondition]) -> Dict[int, SaleCondition]:
+    """Index conditions by numeric id — the form real-time trade messages carry
+    in their `conditions` array (Massive/Polygon normalize per-tape SIP codes
+    into these ids, so live trades don't need a tape to classify)."""
+    return {cond.id: cond for cond in conditions}
+
+
+def classify_trade_by_id(
+    condition_ids: List[int], scope: str = "consolidated",
+    index: Optional[Dict[int, SaleCondition]] = None
+) -> Dict[str, bool]:
+    """Same as classify_trade(), keyed by the numeric condition ids a live
+    trade message's `conditions` field carries instead of tape+SIP-code."""
+    if index is None:
+        index = DEFAULT_ID_INDEX
+    result = {f: True for f in UPDATE_FIELDS}
+    for cid in condition_ids:
+        cond = index.get(cid)
+        if cond is None:
+            continue
+        rules = cond.rules_for(scope)
+        for f in UPDATE_FIELDS:
+            if not rules.get(f, True):
+                result[f] = False
+    return result
+
+
+def get_condition_by_id(condition_id: int, index: Optional[Dict[int, SaleCondition]] = None) -> Optional[SaleCondition]:
+    """Look up the SaleCondition for a single numeric condition id."""
+    if index is None:
+        index = DEFAULT_ID_INDEX
+    return index.get(condition_id)
 
 
 # ------------------------------------------------------- bundled snapshot ---
@@ -193,6 +232,7 @@ _BUNDLED_REFERENCE_RAW = [
 
 DEFAULT_CONDITIONS: List[SaleCondition] = parse_conditions(_BUNDLED_REFERENCE_RAW)
 DEFAULT_INDEX: Dict[str, Dict[str, SaleCondition]] = build_index(DEFAULT_CONDITIONS)
+DEFAULT_ID_INDEX: Dict[int, SaleCondition] = build_id_index(DEFAULT_CONDITIONS)
 
 
 def get_conditions(api_key=None, prefer_live=True) -> List[SaleCondition]:

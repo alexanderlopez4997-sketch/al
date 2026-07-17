@@ -28,6 +28,7 @@ import edgar
 import leaderboard as lb
 import sale_conditions as sc
 import exchanges as ex
+import websocket_client_v2 as wsc
 from meridian_cache import MeridianCache
 
 _PASS = _FAIL = 0
@@ -355,6 +356,28 @@ check("fetch_all_exchanges returns None without an API key", ex.fetch_all_exchan
 _pex = ex.parse_exchanges([{"id": 999, "type": "exchange", "asset_class": "stocks", "locale": "us",
                              "name": "Test Exch", "operating_mic": "TEST", "mic": "TEST", "participant_id": "Q"}])
 check("parse_exchanges round-trips fields", _pex[0].id == 999 and _pex[0].participant_id == "Q")
+
+# ------------------------------------------------- websocket_client_v2 (pure)
+section("websocket_client_v2 · trade processing")
+_client = wsc.DiagnosticsWebSocketClient(symbols=["TEST"], max_buffer_size=10)
+_buf = _client.buffers["TEST"]
+_client._process_trade("TEST", wsc.Trade(symbol="TEST", price=100.0, size=500, conditions=[], timestamp=1))
+_client._process_trade("TEST", wsc.Trade(symbol="TEST", price=999.0, size=100, conditions=[2], timestamp=2))  # Average Price Trade
+_client._process_trade("TEST", wsc.Trade(symbol="TEST", price=101.0, size=300, conditions=[9], timestamp=3))  # Cross Trade
+_bar = _buf.data[-1]
+check("suppressed trade (id 2) does not move high", _bar.high < 999)
+check("suppressed trade (id 2) does not move close", _bar.close == 101.0)
+check("suppressed trade still counted in volume", _bar.volume == 900)
+check("bar open set from first trade", _bar.open == 100.0)
+_buf.close_bar()
+_client._process_trade("TEST", wsc.Trade(symbol="TEST", price=50.0, size=10, conditions=[], timestamp=4))
+check("close_bar() starts a fresh bar on the next trade", len(_buf.data) == 2 and _buf.data[-1].open == 50.0)
+check("Trade.from_message parses short-key attrs", wsc.Trade.from_message(
+    type("Msg", (), {"sym": "AAPL", "p": 190.5, "s": 100, "c": [9], "t": 123})()
+) == wsc.Trade(symbol="AAPL", price=190.5, size=100, conditions=[9], timestamp=123, exchange=None))
+check("Trade.from_message returns None on malformed input", wsc.Trade.from_message(
+    type("Msg", (), {"sym": "AAPL", "p": "not-a-number", "s": 1, "c": [], "t": 1})()
+) is None)
 
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")
