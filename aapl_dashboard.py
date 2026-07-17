@@ -50,6 +50,77 @@ def fetch_sma_data(ticker: str, window: int = 50, timespan: str = "day") -> Opti
         return None
 
 
+def fetch_ema_data(ticker: str, window: int = 50, timespan: str = "day") -> Optional[Dict[str, Any]]:
+    """
+    Fetch EMA data from Massive API.
+
+    Args:
+        ticker: Stock ticker symbol
+        window: EMA window period (default 50)
+        timespan: Time period ('day', 'week', 'month')
+
+    Returns:
+        JSON response with EMA values, or None if request fails
+    """
+    try:
+        api_key = os.environ.get("MASSIVE_API_KEY")
+        if not api_key:
+            return None
+
+        base_url = "https://api.massive.com/v1/indicators/ema"
+        params = {
+            "apiKey": api_key,
+            "timespan": timespan,
+            "window": window,
+            "series_type": "close",
+            "order": "desc",
+            "limit": 100,
+            "adjusted": "true"
+        }
+
+        response = requests.get(f"{base_url}/{ticker}", params=params, timeout=5)
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
+
+
+def fetch_macd_data(ticker: str, timespan: str = "day") -> Optional[Dict[str, Any]]:
+    """
+    Fetch MACD data from Massive API.
+
+    Args:
+        ticker: Stock ticker symbol
+        timespan: Time period ('day', 'week', 'month')
+
+    Returns:
+        JSON response with MACD values, or None if request fails
+    """
+    try:
+        api_key = os.environ.get("MASSIVE_API_KEY")
+        if not api_key:
+            return None
+
+        base_url = "https://api.massive.com/v1/indicators/macd"
+        params = {
+            "apiKey": api_key,
+            "timespan": timespan,
+            "short_window": 12,
+            "long_window": 26,
+            "signal_window": 9,
+            "series_type": "close",
+            "order": "desc",
+            "limit": 100,
+            "adjusted": "true"
+        }
+
+        response = requests.get(f"{base_url}/{ticker}", params=params, timeout=5)
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
+
+
 class AAPLDataProcessor:
     """Process AAPL stock data and generate analytics."""
 
@@ -163,7 +234,8 @@ class AAPLDataProcessor:
         """Get formatted data for charting."""
         return self.processed_data
 
-    def generate_summary(self, include_sma: bool = True) -> Dict[str, Any]:
+    def generate_summary(self, include_sma: bool = True, include_ema: bool = True,
+                        include_macd: bool = True) -> Dict[str, Any]:
         """Generate comprehensive summary statistics."""
         min_p, max_p, avg_p = self.get_price_range()
         change, pct_change = self.get_price_change()
@@ -176,6 +248,18 @@ class AAPLDataProcessor:
             sma_response = fetch_sma_data("AAPL", window=50, timespan="day")
             if sma_response:
                 sma_data = sma_response
+
+        ema_data = None
+        if include_ema:
+            ema_response = fetch_ema_data("AAPL", window=50, timespan="day")
+            if ema_response:
+                ema_data = ema_response
+
+        macd_data = None
+        if include_macd:
+            macd_response = fetch_macd_data("AAPL", timespan="day")
+            if macd_response:
+                macd_data = macd_response
 
         return {
             "ticker": "AAPL",
@@ -196,7 +280,9 @@ class AAPLDataProcessor:
             "levels": levels,
             "moving_averages": mas,
             "chart_data": self.get_chart_data(),
-            "sma_data": sma_data
+            "sma_data": sma_data,
+            "ema_data": ema_data,
+            "macd_data": macd_data
         }
 
 
@@ -208,19 +294,39 @@ def render_dashboard_html(summary: Dict[str, Any]) -> str:
     volatility = summary["volatility"]
     levels = summary["levels"]
     sma_data = summary.get("sma_data")
+    ema_data = summary.get("ema_data")
+    macd_data = summary.get("macd_data")
 
     # Format change color
     change_color = "#2ECC8F" if price_stats["change"] >= 0 else "#FF5449"
     change_sign = "+" if price_stats["change"] >= 0 else ""
 
-    # SMA info
-    sma_info = ""
+    # Technical indicators info
+    indicator_info = ""
+
     if sma_data and sma_data.get("results") and sma_data["results"].get("values"):
         sma_values = sma_data["results"]["values"]
         if sma_values:
             latest_sma = sma_values[0]["value"] if isinstance(sma_values[0], dict) else None
             if latest_sma:
-                sma_info = f"<div class='info-item'><div class='info-label'>SMA(50)</div><div class='info-value'>${latest_sma:.2f}</div></div>"
+                indicator_info += f"<div class='info-item'><div class='info-label'>SMA(50)</div><div class='info-value'>${latest_sma:.2f}</div></div>"
+
+    if ema_data and ema_data.get("results") and ema_data["results"].get("values"):
+        ema_values = ema_data["results"]["values"]
+        if ema_values:
+            latest_ema = ema_values[0]["value"] if isinstance(ema_values[0], dict) else None
+            if latest_ema:
+                indicator_info += f"<div class='info-item'><div class='info-label'>EMA(50)</div><div class='info-value'>${latest_ema:.2f}</div></div>"
+
+    if macd_data and macd_data.get("results") and macd_data["results"].get("values"):
+        macd_values = macd_data["results"]["values"]
+        if macd_values:
+            latest_macd = macd_values[0] if isinstance(macd_values[0], dict) else None
+            if latest_macd:
+                macd_line = latest_macd.get("value", 0)
+                signal_line = latest_macd.get("signal", 0)
+                histogram = macd_line - signal_line
+                indicator_info += f"<div class='info-item'><div class='info-label'>MACD</div><div class='info-value'>{histogram:.4f}</div></div>"
 
     html = f"""
     <!DOCTYPE html>
@@ -465,7 +571,7 @@ def render_dashboard_html(summary: Dict[str, Any]) -> str:
                         <div class="info-label">Current vs Avg</div>
                         <div class="info-value">{round((price_stats["current"] - levels["avg_price"]) / levels["avg_price"] * 100, 2)}%</div>
                     </div>
-                    {sma_info}
+                    {indicator_info}
                 </div>
             </div>
 
