@@ -5,13 +5,49 @@ AAPL Stock Data Visualization Dashboard
 
 Processes and visualizes AAPL stock data from Polygon.io API.
 Provides comprehensive analysis including price trends, technical indicators,
-and performance metrics.
+and performance metrics. Integrates SMA data from Massive API.
 """
 
 from datetime import datetime
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import json
 import math
+import os
+import requests
+
+
+def fetch_sma_data(ticker: str, window: int = 50, timespan: str = "day") -> Optional[Dict[str, Any]]:
+    """
+    Fetch SMA data from Massive API.
+
+    Args:
+        ticker: Stock ticker symbol
+        window: SMA window period (default 50)
+        timespan: Time period ('day', 'week', 'month')
+
+    Returns:
+        JSON response with SMA values, or None if request fails
+    """
+    try:
+        api_key = os.environ.get("MASSIVE_API_KEY")
+        if not api_key:
+            return None
+
+        base_url = "https://api.massive.com/v1/indicators/sma"
+        params = {
+            "apiKey": api_key,
+            "timespan": timespan,
+            "window": window,
+            "series_type": "close",
+            "order": "desc",
+            "limit": 100
+        }
+
+        response = requests.get(f"{base_url}/{ticker}", params=params, timeout=5)
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
 
 
 class AAPLDataProcessor:
@@ -127,13 +163,19 @@ class AAPLDataProcessor:
         """Get formatted data for charting."""
         return self.processed_data
 
-    def generate_summary(self) -> Dict[str, Any]:
+    def generate_summary(self, include_sma: bool = True) -> Dict[str, Any]:
         """Generate comprehensive summary statistics."""
         min_p, max_p, avg_p = self.get_price_range()
         change, pct_change = self.get_price_change()
         volatility = self.calculate_volatility()
         levels = self.get_price_levels()
         mas = self.calculate_moving_averages()
+
+        sma_data = None
+        if include_sma:
+            sma_response = fetch_sma_data("AAPL", window=50, timespan="day")
+            if sma_response:
+                sma_data = sma_response
 
         return {
             "ticker": "AAPL",
@@ -153,7 +195,8 @@ class AAPLDataProcessor:
             "volatility": volatility,
             "levels": levels,
             "moving_averages": mas,
-            "chart_data": self.get_chart_data()
+            "chart_data": self.get_chart_data(),
+            "sma_data": sma_data
         }
 
 
@@ -164,10 +207,20 @@ def render_dashboard_html(summary: Dict[str, Any]) -> str:
     price_stats = summary["price_stats"]
     volatility = summary["volatility"]
     levels = summary["levels"]
+    sma_data = summary.get("sma_data")
 
     # Format change color
     change_color = "#2ECC8F" if price_stats["change"] >= 0 else "#FF5449"
     change_sign = "+" if price_stats["change"] >= 0 else ""
+
+    # SMA info
+    sma_info = ""
+    if sma_data and sma_data.get("results") and sma_data["results"].get("values"):
+        sma_values = sma_data["results"]["values"]
+        if sma_values:
+            latest_sma = sma_values[0]["value"] if isinstance(sma_values[0], dict) else None
+            if latest_sma:
+                sma_info = f"<div class='info-item'><div class='info-label'>SMA(50)</div><div class='info-value'>${latest_sma:.2f}</div></div>"
 
     html = f"""
     <!DOCTYPE html>
@@ -412,6 +465,7 @@ def render_dashboard_html(summary: Dict[str, Any]) -> str:
                         <div class="info-label">Current vs Avg</div>
                         <div class="info-value">{round((price_stats["current"] - levels["avg_price"]) / levels["avg_price"] * 100, 2)}%</div>
                     </div>
+                    {sma_info}
                 </div>
             </div>
 
@@ -428,24 +482,26 @@ def render_dashboard_html(summary: Dict[str, Any]) -> str:
             const dates = chartData.map(d => d.date);
             const prices = chartData.map(d => d.price);
 
+            const datasets = [{{
+                label: 'AAPL Price',
+                data: prices,
+                borderColor: '#4F9DE0',
+                backgroundColor: 'rgba(79, 157, 224, 0.1)',
+                borderWidth: 2,
+                fill: true,
+                tension: 0.4,
+                pointBackgroundColor: '#4F9DE0',
+                pointBorderColor: '#ffffff',
+                pointRadius: 4,
+                pointHoverRadius: 6
+            }}];
+
             const priceCtx = document.getElementById('priceChart').getContext('2d');
             new Chart(priceCtx, {{
                 type: 'line',
                 data: {{
                     labels: dates,
-                    datasets: [{{
-                        label: 'AAPL Price',
-                        data: prices,
-                        borderColor: '#4F9DE0',
-                        backgroundColor: 'rgba(79, 157, 224, 0.1)',
-                        borderWidth: 2,
-                        fill: true,
-                        tension: 0.4,
-                        pointBackgroundColor: '#4F9DE0',
-                        pointBorderColor: '#ffffff',
-                        pointRadius: 4,
-                        pointHoverRadius: 6
-                    }}]
+                    datasets: datasets
                 }},
                 options: {{
                     responsive: true,
