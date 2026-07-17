@@ -978,6 +978,21 @@ def build_report_segments(res, opt, account, risk):
         tail = " Alt-data skipped to save API calls." if res.get("alt_skipped") else ""
         add(f"). Score shown for reference — do not treat as a buy.{tail}\n", "sell")
         add("─" * 52 + "\n", "dim")
+    # ---- EDGE STATUS: NO EDGE detection and track record override ----
+    edge_status = v.get("edge_status", "ACTIVE")
+    if edge_status in ("NO_EDGE", "OVERRIDDEN"):
+        add("EDGE STATUS  ", "head")
+        if edge_status == "NO_EDGE":
+            add("🔴 NO EDGE", "sell")
+            ir = v.get("information_ratio", 0.0)
+            wr = v.get("win_rate", 0.5)
+            add(f" — Information Ratio {ir:.3f} < 0.05 or Win Rate {wr*100:.0f}% < 50%", "dim")
+            add("\n  No statistical edge detected. Signal suppressed (score set to 0).\n", "warn")
+        elif edge_status == "OVERRIDDEN":
+            add("🟡 OVERRIDDEN", "warn")
+            add(" — Track record override active", "dim")
+            add("\n  Historical performance (100+ trades or Sharpe > 1.2) overrides current NO EDGE.\n", "dim")
+        add("─" * 52 + "\n", "dim")
     # ---- CONFIRMATION SCORE: auto-run the "verify a green light" checklist ----
     try:
         cs = cf.confirm(res)

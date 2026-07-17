@@ -321,6 +321,8 @@ class MetricsStage:
     """Stage 5: Compute final verdict and performance metrics."""
     @staticmethod
     def execute(data):
+        import edge_tracker as et
+
         score = float(data.comp.iloc[-1])
         last = float(data.d["Close"].iloc[-1])
         atr_pct = float(data.d["atr"].iloc[-1] / last * 100)
@@ -331,12 +333,30 @@ class MetricsStage:
             buy_th = REGIME_THRESHOLDS.get(data.regime["regime"], {}).get("enter", buy_th)
             strong_th = REGIME_THRESHOLDS.get(data.regime["regime"], {}).get("strong", strong_th)
 
-        data.verdict = verdict(score, atr_pct, buy_th, strong_th, data.regime)
+        ir = data.ir.get("Direction") if data.ir else 0.0
+        win_rate = data.F.iloc[-1].mean() if data.F is not None else 0.5
+
+        edge_status = "ACTIVE"
+        factor_id = data.ticker
+
+        check_result, has_edge = et.check_edge(factor_id, ir, win_rate)
+        edge_status = check_result
+
+        if not has_edge:
+            override, track_record = et.track_record_override(factor_id)
+            if override:
+                edge_status = "OVERRIDDEN"
+            else:
+                if score > 0:
+                    score = 0
+
+        data.verdict = verdict(score, atr_pct, buy_th, strong_th, data.regime, edge_status, ir, win_rate)
         data.score = score
         data.last = last
         data.atr_pct = atr_pct
         data.chg = float((last/data.d["Close"].iloc[-2]-1)*100)
         data.conviction = conviction(data.F.iloc[-1], score)
+        data.edge_status = edge_status
         return data
 
 class Pipeline:
@@ -780,7 +800,7 @@ def vol_thresholds(ann_vol):
     factor = min(1.8, 1.0 + max(0.0, (ann_vol - 25.0) / 40.0))
     return round(ENTER * factor, 1), round(45.0 * factor, 1)
 
-def verdict(score, atr_pct, buy=ENTER, strong=45.0, regime=None):
+def verdict(score, atr_pct, buy=ENTER, strong=45.0, regime=None, edge_status="ACTIVE", ir=None, win_rate=None):
     if regime and regime.get("confidence", 0) > 0.5:
         buy = REGIME_THRESHOLDS.get(regime["regime"], {}).get("enter", buy)
         strong = REGIME_THRESHOLDS.get(regime["regime"], {}).get("strong", strong)
@@ -790,7 +810,13 @@ def verdict(score, atr_pct, buy=ENTER, strong=45.0, regime=None):
     elif score > -buy: lab, tone = "HOLD / no edge", "neutral"
     elif score > -strong: lab, tone = "AVOID / sell signal", "bad"
     else: lab, tone = "STRONG AVOID", "bad"
-    return {"label": lab, "tone": tone, "risky": bool(atr_pct >= RISKY_ATR_PCT)}
+
+    result = {"label": lab, "tone": tone, "risky": bool(atr_pct >= RISKY_ATR_PCT), "edge_status": edge_status}
+    if ir is not None:
+        result["information_ratio"] = ir
+    if win_rate is not None:
+        result["win_rate"] = win_rate
+    return result
 
 def calibrate_thresholds(comp, close, horizon=5, min_bars=150):
     """Derive per-name BUY/STRONG cutoffs from history instead of the fixed
@@ -1448,6 +1474,7 @@ def analyze_pipeline(ticker, df, interval, account=None, risk_pct=1.0):
             "ann_vol": ann_vol, "maxdd": float((data.d["Close"]/data.d["Close"].cummax()-1).min()*100),
             "verdict": data.verdict, "conviction": data.conviction,
             "backtest": data.backtest, "backtest_by_regime": data.backtest_by_regime,
+            "edge_status": data.edge_status if hasattr(data, 'edge_status') else "ACTIVE",
         }
     }
 
@@ -1501,8 +1528,39 @@ def analyze(ticker, df, interval, weights=None, d=None, F=None, calibrate=False)
     wr = bt["winrate"]
     ineligible = bool(bt["sharpe"] < 0 or (not math.isnan(wr) and bt["trades"] >= 3 and wr < 0.35))
 
-    vrd = verdict(score, atr_pct, buy_th, strong_th, regime)
+    import edge_tracker as et
+    ir_value = ir.get("Direction", 0.0) if ir else 0.0
+    win_rate = float(wr) if not math.isnan(wr) else 0.5
+    edge_status = "ACTIVE"
+
+    check_result, has_edge = et.check_edge(ticker, ir_value, win_rate)
+    edge_status = check_result
+
+    edge_override = False
+    if not has_edge:
+        override, track_record = et.track_record_override(ticker)
+        if override:
+            edge_status = "OVERRIDDEN"
+            edge_override = True
+        else:
+            if score > 0:
+                score = 0
+
+    vrd = verdict(score, atr_pct, buy_th, strong_th, regime, edge_status, ir_value, win_rate)
     conf = confirmation_checklist(score, vrd, conviction(F.iloc[-1], score), bt, fwd, buy_th, strong_th)
+
+    try:
+        win_count = int(win_rate * bt["trades"]) if not math.isnan(win_rate) and bt["trades"] > 0 else 0
+        loss_count = bt["trades"] - win_count if bt["trades"] > 0 else 0
+        et.log_factor_performance(
+            ticker, win_count, loss_count,
+            bt.get("strategy", 0.0),
+            bt.get("sharpe", 0.0),
+            ir_value,
+            bt.get("maxdd", 0.0)
+        )
+    except Exception:
+        pass
 
     return {"ticker": ticker, "d": d, "F": F, "score": score, "last": last,
             "chg": float((last/d["Close"].iloc[-2]-1)*100),
@@ -1517,7 +1575,8 @@ def analyze(ticker, df, interval, weights=None, d=None, F=None, calibrate=False)
             "intraday": intraday, "calib": calib, "fwd_stats": fwd,
             "limited_history": limited_history, "n_bars": nb,
             "whale_activity": whale_score(d),
-            "regime": regime, "factor_correlation": corr_analysis, "information_ratio": ir}
+            "regime": regime, "factor_correlation": corr_analysis, "information_ratio": ir,
+            "edge_status": edge_status, "edge_override": edge_override}
 
 # -------------------------------------------------------------- reports ---
 def reasons(row):
