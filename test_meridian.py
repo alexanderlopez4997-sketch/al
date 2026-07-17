@@ -30,6 +30,7 @@ import sale_conditions as sc
 import exchanges as ex
 import websocket_client_v2 as wsc
 from meridian_cache import MeridianCache
+import tui_dashboard as td
 
 _PASS = _FAIL = 0
 _FAILURES = []
@@ -378,6 +379,27 @@ check("Trade.from_message parses short-key attrs", wsc.Trade.from_message(
 check("Trade.from_message returns None on malformed input", wsc.Trade.from_message(
     type("Msg", (), {"sym": "AAPL", "p": "not-a-number", "s": 1, "c": [], "t": 1})()
 ) is None)
+
+section("tui_dashboard")
+check("parse_watchlist splits and strips", td.parse_watchlist("NVDA, AMD , AAPL") == ["NVDA", "AMD", "AAPL"])
+check("load_saved_watchlist returns a non-empty list", len(td.load_saved_watchlist()) > 0)
+check("market_session returns a known session label", td.market_session() in ("pre", "open", "post", "closed"))
+_raw = {t: qe.demo_data(t) for t in ["NVDA", "AMD"]}
+_scored, _res_by_t = td.score_watchlist(["NVDA", "AMD"], _raw)
+check("score_watchlist returns one row per ticker with data", len(_scored) == 2)
+check("score_watchlist rows have watchlist-table shape",
+      set(_scored[0]) >= {"ticker", "last", "chg", "score", "tone", "verdict"})
+check("score_watchlist also returns per-ticker res for reuse", set(_res_by_t) == {"NVDA", "AMD"})
+check("score_watchlist rows sorted by descending score",
+      all(_scored[i]["score"] >= _scored[i+1]["score"] for i in range(len(_scored)-1)))
+_events = td.demo_event_annotations("NVDA")
+check("demo_event_annotations returns 2 labeled placeholders", len(_events) == 2)
+check("demo_event_annotations labels are marked (demo)", all("(demo)" in e[0] for e in _events))
+_reasons = td.catalyst_reasons(_res_by_t["NVDA"])
+check("catalyst_reasons returns morning.catalyst_score's reasons list", isinstance(_reasons, list))
+check("account_health averages open-position pnl_pct",
+      td.account_health([{"pnl_pct": 10.0}, {"pnl_pct": -2.0}]) == 4.0)
+check("account_health is None with no open positions", td.account_health([]) is None)
 
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")
