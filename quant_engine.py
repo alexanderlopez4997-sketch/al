@@ -676,7 +676,7 @@ def _anneal_core(FA, ret, ppy, n_iter=500, seed=11, slippage_pct=SLIPPAGE_PCT):
     eq_cache = np.empty(n_ret)
 
     def loss_of(wv):
-        nonlocal pos_diff_cache, strat_cache, eq_cache
+        nonlocal pos_diff_cache, strat_cache, eq_cache  # noqa: F824
         comp = 100.0*(FA @ wv)
         pos = _positions_np(comp)
         strat_cache[0] = 0.0
