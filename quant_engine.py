@@ -45,7 +45,9 @@ def signed(x, fmt="{:+.2f}"):
     s = fmt.format(x)
     return gr(s) if x >= 0 else rd(s)
 
-FINNHUB_DEFAULT_KEY = "d930h31r01qpou38ope0d930h31r01qpou38opeg"
+FINNHUB_DEFAULT_KEY = os.environ.get("FINNHUB_KEY", "")
+MASSIVE_DEFAULT_KEY = os.environ.get("MASSIVE_KEY", "")
+MASSIVE_API_BASE = os.environ.get("MASSIVE_API_BASE", "https://api.massive.com")
 FACTORS = ["Direction", "Momentum", "Volume", "MeanRev"]
 BASE_WEIGHTS = {"Direction": 0.38, "Momentum": 0.27, "Volume": 0.20, "MeanRev": 0.15}
 
@@ -985,45 +987,45 @@ def _session_from_et(et):
     if 240 <= mins < 570:   return "pre-market"    # 04:00–09:30
     return "closed"
 
-def alpaca_latest_price(ticker, key, secret, timeout=5):
-    """Latest trade from Alpaca (IEX feed) — INCLUDES pre-market and after-hours
-    trades, unlike Finnhub /quote (which only sees the regular session). Returns
-    {price, ts, source, session} where session ∈ regular/pre-market/after-hours/
-    closed, or None on failure."""
-    if not (key and secret):
+def massive_quote(ticker, key, timeout=5):
+    """Real-time snapshot from Massive (Polygon-compatible market-data API —
+    same endpoint paths/conventions as Polygon.io, so this parser follows that
+    well-established snapshot schema: {ticker: {lastTrade, prevDay, ...}}).
+    Consolidates the latest trade + previous close into a live quote, with
+    trading-session detection derived from the trade's update timestamp.
+    Returns {price, prev_close, change_pct, ts, source, session}, or None on
+    failure (missing key, no coverage, or an unrecognized response shape —
+    fails open like the other realtime-quote sources)."""
+    if not key:
         return None
-    import json, re, urllib.request
-    from datetime import datetime, timezone
+    import json, urllib.request
     try:
-        url = f"https://data.alpaca.markets/v2/stocks/{ticker}/trades/latest?feed=iex"
-        req = urllib.request.Request(url, headers={"APCA-API-KEY-ID": key,
-                                                   "APCA-API-SECRET-KEY": secret})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            tr = json.loads(r.read().decode()).get("trade", {})
-        px = tr.get("p"); ts = tr.get("t")
-        if not px or px <= 0:
+        url = (f"{MASSIVE_API_BASE}/v2/snapshot/locale/us/markets/stocks/"
+               f"tickers/{ticker}?apiKey={key}")
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            data = json.loads(r.read().decode())
+        t = data.get("ticker") or data.get("results") or {}
+        last = t.get("lastTrade") or {}
+        price = last.get("p")
+        if not price or price <= 0:
             return None
+        prev_close = float((t.get("prevDay") or {}).get("c") or 0.0)
+        change_pct = t.get("todaysChangePerc")
+        ts_ns = last.get("t") or t.get("updated")
         session = "regular"
         try:
-            from zoneinfo import ZoneInfo
-            m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", ts or "")
-            if m:
-                utc = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            if ts_ns:
+                from datetime import datetime, timezone
+                from zoneinfo import ZoneInfo
+                utc = datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc)
                 session = _session_from_et(utc.astimezone(ZoneInfo("America/New_York")))
         except Exception:
             pass
-        return {"price": float(px), "ts": ts, "source": "Alpaca", "session": session}
+        return {"price": float(price), "prev_close": prev_close,
+                "change_pct": float(change_pct) if change_pct is not None else 0.0,
+                "ts": ts_ns, "source": "Massive", "session": session}
     except Exception:
         return None
-
-def realtime_quote(ticker, finnhub_key=None, alpaca_key=None, alpaca_secret=None):
-    """Best available live price: Alpaca first (sees extended hours), Finnhub
-    fallback (regular session only). None if neither works."""
-    if alpaca_key and alpaca_secret:
-        q = alpaca_latest_price(ticker, alpaca_key, alpaca_secret)
-        if q:
-            return q
-    return finnhub_quote(ticker, finnhub_key)
 
 def alpaca_latest_trade(ticker, key, secret, timeout=5):
     """Latest trade price from Alpaca (IEX). Unlike a regular-session quote this
@@ -1042,13 +1044,20 @@ def alpaca_latest_trade(ticker, key, secret, timeout=5):
     except Exception:
         return None
 
-def realtime_quote(ticker, finnhub_key=None, alpaca_key=None, alpaca_secret=None):
-    """Best available live price. Prefers Alpaca's latest trade (real-time AND
-    includes pre/post-market), falls back to Finnhub /quote (regular session).
-    Returns {price, source} or None."""
+def realtime_quote(ticker, finnhub_key=None, alpaca_key=None, alpaca_secret=None, massive_key=None):
+    """Best available live price, tried in priority order:
+      1. Alpaca latest trade — real-time, INCLUDES pre/post-market
+      2. Massive snapshot    — real-time, regular session (falls back if no key)
+      3. Finnhub /quote      — free, regular session only, last resort
+    Returns {price, source} or None if nothing works. massive_key defaults to
+    the MASSIVE_KEY env var (MASSIVE_DEFAULT_KEY) when not passed explicitly,
+    matching how finnhub_key/FINNHUB_DEFAULT_KEY are wired at the CLI layer."""
     p = alpaca_latest_trade(ticker, alpaca_key, alpaca_secret)
     if p:
         return {"price": p, "source": "Alpaca (incl. extended hrs)"}
+    q = massive_quote(ticker, massive_key or MASSIVE_DEFAULT_KEY)
+    if q:
+        return {"price": q["price"], "source": "Massive"}
     q = finnhub_quote(ticker, finnhub_key)
     if q:
         return {"price": q["price"], "source": "Finnhub"}
@@ -1960,6 +1969,7 @@ def main():
     ap.add_argument("--add-position", nargs=2, metavar=("TICKER", "ENTRY_PRICE"), help="add a new position (ticker, entry_price)")
     ap.add_argument("--close-position", nargs=2, metavar=("TICKER", "EXIT_PRICE"), help="close a position (ticker, exit_price)")
     ap.add_argument("--finnhub-key", default=os.environ.get("FINNHUB_KEY", FINNHUB_DEFAULT_KEY))
+    ap.add_argument("--massive-key", default=os.environ.get("MASSIVE_KEY", MASSIVE_DEFAULT_KEY))
     ap.add_argument("--no-color", action="store_true")
     args = ap.parse_args()
     global COLOR
