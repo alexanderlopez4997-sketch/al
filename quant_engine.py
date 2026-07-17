@@ -352,6 +352,10 @@ class Pipeline:
 # ----------------------------------------------------------- indicators ---
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
 
+def _ema_multi(close, spans):
+    """Batch EMA computation for multiple spans — avoid redundant iterations."""
+    return {n: ema(close, n) for n in spans}
+
 def rsi(close, n=14):
     d = close.diff()
     ag = d.clip(lower=0).ewm(alpha=1/n, adjust=False).mean()
@@ -391,19 +395,31 @@ def obv(df):
 
 def enrich(df):
     d = df.copy()
-    d["e20"] = ema(d["Close"], 20); d["e50"] = ema(d["Close"], 50)
-    d["rsi"] = rsi(d["Close"])
-    m = ema(d["Close"], 12) - ema(d["Close"], 26)
-    d["macd"], d["macds"] = m, m.ewm(span=9, adjust=False).mean()
+    c = d["Close"]
+
+    emas = _ema_multi(c, [12, 20, 26, 50])
+    d["e20"] = emas[20]; d["e50"] = emas[50]
+
+    d["rsi"] = rsi(c)
+    m = emas[12] - emas[26]
+    d["macd"] = m
+    d["macds"] = m.ewm(span=9, adjust=False).mean()
     d["mach"] = d["macd"] - d["macds"]
     d["atr"] = atr(d)
     d["st"], d["stdir"] = supertrend(d)
-    mid = d["Close"].rolling(20).mean(); sd = d["Close"].rolling(20).std()
+
+    roll20 = c.rolling(20)
+    mid = roll20.mean()
+    sd = roll20.std()
     d["bb_bw"] = ((mid+2*sd)-(mid-2*sd))/mid*100
-    d["z"] = ((d["Close"]-mid)/sd.replace(0, np.nan)).fillna(0.0)
+    d["z"] = ((c-mid)/sd.replace(0, np.nan)).fillna(0.0)
+
     d["relvol"] = d["Volume"]/d["Volume"].rolling(20).mean()
     d["obv"] = obv(d)
-    d["hi20"] = d["High"].rolling(20).max(); d["lo20"] = d["Low"].rolling(20).min()
+
+    d["hi20"] = d["High"].rolling(20).max()
+    d["lo20"] = d["Low"].rolling(20).min()
+
     up = d["Volume"].where(d["Close"] >= d["Open"], 0.0)
     dn = d["Volume"].where(d["Close"] < d["Open"], 0.0)
     ru, rdn = up.rolling(20).sum(), dn.rolling(20).sum()
@@ -630,32 +646,50 @@ def _anneal_core(FA, ret, ppy, n_iter=500, seed=11, slippage_pct=SLIPPAGE_PCT):
     Returns (best_weight_vector, best_loss). Kept pure/numpy so it can be reused
     per fold in walk-forward validation without pandas overhead."""
     rng = np.random.default_rng(seed)
+    n_factors = FA.shape[1]
+    n_ret = len(ret)
+
+    pos_diff_cache = np.empty(n_ret)
+    strat_cache = np.empty(n_ret)
+    eq_cache = np.empty(n_ret)
+
     def loss_of(wv):
+        nonlocal pos_diff_cache, strat_cache, eq_cache
         comp = 100.0*(FA @ wv)
         pos = _positions_np(comp)
-        strat = np.empty_like(pos); strat[0] = 0.0; strat[1:] = pos[:-1]*ret[1:]
+        strat_cache[0] = 0.0
+        strat_cache[1:] = pos[:-1] * ret[1:]
         if slippage_pct > 0:
-            slippage = np.abs(np.diff(pos, prepend=0)) * (slippage_pct / 100.0)
-            strat = strat - slippage
-        eq = np.cumprod(1.0+strat)
-        return objective_loss(eq, strat, pos, ppy)
+            np.abs(np.diff(pos, prepend=0), out=pos_diff_cache)
+            strat_cache -= pos_diff_cache * (slippage_pct / 100.0)
+        np.cumprod(1.0 + strat_cache, out=eq_cache)
+        return objective_loss(eq_cache, strat_cache, pos, ppy)
+
     base = np.array([BASE_WEIGHTS[k] for k in FACTORS])
     w = base.copy(); loss = loss_of(w); best_w, best_l = w.copy(), loss; T = 0.6
+    no_improve = 0
+
     for _ in range(n_iter):
-        cand = np.clip(w + rng.normal(0, 0.08, len(w))*max(T, 0.05), 0.02, 0.60)
+        cand = np.clip(w + rng.normal(0, 0.08, n_factors)*max(T, 0.05), 0.02, 0.60)
         cand /= cand.sum(); l = loss_of(cand)
         if l < loss or rng.random() < math.exp(min(0.0, (loss-l))/max(T, 1e-3)):
             w, loss = cand, l
-            if l < best_l: best_w, best_l = cand.copy(), l
+            if l < best_l: best_w, best_l = cand.copy(), l; no_improve = 0
+            else: no_improve += 1
+        else:
+            no_improve += 1
         T *= 0.985
+        if no_improve > 80 and T < 0.01: break
     return best_w, best_l
 
 def _seg_sharpe_w(F, close, wv, lo, hi, ppy):
     """Sharpe of a weight set on bars [lo:hi], returns computed within the slice."""
-    Fi = F.iloc[lo:hi]
-    comp = pd.Series(100*(Fi[FACTORS].values @ wv), index=Fi.index)
-    ret = close.iloc[lo:hi].pct_change().fillna(0.0)
-    s = _sharpe(positions(comp).shift(1).fillna(0.0)*ret, ppy)
+    FA_slice = F[FACTORS].values[lo:hi]
+    comp_vals = 100.0 * (FA_slice @ wv)
+    ret_slice = close.iloc[lo:hi].pct_change().fillna(0.0).values
+    pos = _positions_np(comp_vals)
+    strat = np.empty_like(pos); strat[0] = 0.0; strat[1:] = pos[:-1] * ret_slice[1:]
+    s = _sharpe(strat, ppy)
     return s
 
 def walk_forward_validate(F, close, ppy=252, folds=4, n_iter=300, seed=11):
@@ -668,14 +702,18 @@ def walk_forward_validate(F, close, ppy=252, folds=4, n_iter=300, seed=11):
     step = n // (folds + 1)
     if n < 150 or step < 40:
         return None
+    FA_full = F[FACTORS].values
+    close_vals = close.values
+    ret_full = np.diff(close_vals, prepend=close_vals[0]) / close_vals.clip(min=1e-9) - 1.0
+    ret_full[0] = 0.0
     oos = []
     for k in range(1, folds + 1):
         tr_hi = step * k
         te_lo, te_hi = tr_hi, (n if k == folds else step * (k + 1))
         if te_hi - te_lo < 30:
             continue
-        FA_tr = F[FACTORS].values[0:tr_hi]
-        ret_tr = close.iloc[0:tr_hi].pct_change().fillna(0.0).values
+        FA_tr = FA_full[0:tr_hi]
+        ret_tr = ret_full[0:tr_hi]
         w, _ = _anneal_core(FA_tr, ret_tr, ppy, n_iter, seed)
         oos.append(_seg_sharpe_w(F, close, w, te_lo, te_hi, ppy))
     valid = [s for s in oos if np.isfinite(s)]
@@ -687,25 +725,35 @@ def walk_forward_validate(F, close, ppy=252, folds=4, n_iter=300, seed=11):
 
 def optimize_weights(F, close, ppy=252, n_iter=500, seed=11, walk_forward=True):
     n = len(F); cut = max(60, int(n*0.7))
-    FA_train = F[FACTORS].values[0:cut]
-    ret_train = close.iloc[0:cut].pct_change().fillna(0.0).values
+    FA_full = F[FACTORS].values
+    close_vals = close.values
+    ret_full = np.diff(close_vals, prepend=close_vals[0]) / close_vals.clip(min=1e-9) - 1.0
+    ret_full[0] = 0.0
+
+    FA_train = FA_full[0:cut]
+    ret_train = ret_full[0:cut]
     best_w, best_l = _anneal_core(FA_train, ret_train, ppy, n_iter, seed)
-    def seg(wv, lo, hi):
-        Fi = F.iloc[lo:hi]
-        comp = pd.Series(100*(Fi[FACTORS].values @ wv), index=Fi.index)
-        ret = close.iloc[lo:hi].pct_change().fillna(0.0)
-        pos = positions(comp)
-        strat = pos.shift(1).fillna(0.0)*ret
-        return (1+strat).cumprod().values, strat, pos.values
+
+    def seg_metrics(wv, lo, hi):
+        FA_slice = FA_full[lo:hi]
+        comp = 100.0 * (FA_slice @ wv)
+        pos = _positions_np(comp)
+        ret_slice = ret_full[lo:hi]
+        strat = np.empty(len(pos))
+        strat[0] = 0.0
+        strat[1:] = pos[:-1] * ret_slice[1:]
+        eq = np.cumprod(1.0 + strat)
+        return eq, strat, pos
+
     def seg_loss(wv, lo, hi):
-        eq, strat, pos = seg(wv, lo, hi)
-        return objective_loss(eq, strat.values, pos, ppy)
+        eq, strat, pos = seg_metrics(wv, lo, hi)
+        return objective_loss(eq, strat, pos, ppy)
     def seg_sharpe(wv, lo, hi):
-        s = _sharpe(seg(wv, lo, hi)[1], ppy)
+        eq, strat, pos = seg_metrics(wv, lo, hi)
+        s = _sharpe(strat, ppy)
         return -9.0 if not np.isfinite(s) else s
+
     base = np.array([BASE_WEIGHTS[k] for k in FACTORS])
-    # Round for display, but absorb the rounding residual into the largest weight
-    # so the reported weights sum to exactly 1.0 (they're also used to score).
     wr = [round(float(v), 3) for v in best_w]
     imax = int(np.argmax(best_w))
     wr[imax] = round(wr[imax] + (1.0 - sum(wr)), 3)
@@ -1534,10 +1582,13 @@ def report(res, args, opt=None):
     tone = {"good": gr, "neutral": yl, "bad": rd}[v["tone"]]
     line = dim("\u2500"*66)
     print(line)
-    print(f"{bold(res['ticker']):<16} last {bold(f'{res['last']:.2f}')}  "
-          f"{signed(res['chg'], '{:+.2f}%')}   "
-          f"{dim(f'{len(d)} bars · {args.interval} · {args.period}')}")
-    print(line)
+    ticker = res["ticker"]
+    last_px = f'{res["last"]:.2f}'
+    chg_pct = res["chg"]
+    bars_info = f'{len(d)} bars · {args.interval} · {args.period}'
+    print(f"{bold(ticker):<16} last {bold(last_px)}  "
+          f"{signed(chg_pct, '{:+.2f}%')}   "
+          f"{dim(bars_info)}")
 
     conf = res.get("confirmation", {})
     if conf:
