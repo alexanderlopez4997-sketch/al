@@ -35,6 +35,49 @@ python3 quant_engine.py --close-position AAPL 320    # Exit
 python3 quant_engine.py --positions                  # Show all
 ```
 
+## Email Alerts (Gmail)
+
+Send `--alerts` or `--morning` reports to your inbox instead of (or in addition
+to) reading them off the terminal:
+
+```bash
+# one-time setup — Gmail App Password requires 2-Step Verification:
+# https://myaccount.google.com/apppasswords
+export GMAIL_ADDRESS="you@gmail.com"
+export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
+# optional: export GMAIL_TO="someone-else@example.com" (defaults to GMAIL_ADDRESS)
+
+python3 quant_engine.py AAPL MSFT NVDA TSLA --alerts --email
+python3 quant_engine.py AAPL MSFT NVDA TSLA --morning --email
+```
+
+Mail is sent via `mailer.py` over Gmail's SMTP relay (`smtplib`) — no OAuth
+setup needed, just the app password.
+
+Credentials for either can also live in a local `.env` file (copy
+`.env.example` to `.env`; it's git-ignored) instead of shell exports.
+
+## Discord Alerts
+
+Post `--alerts` or `--morning` reports to a Discord channel via an incoming
+webhook — simpler than Gmail, no account credentials involved:
+
+```bash
+# one-time setup — Discord: Server Settings -> Integrations -> Webhooks ->
+# New Webhook -> Copy Webhook URL
+export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+
+python3 quant_engine.py AAPL MSFT NVDA TSLA --alerts --discord
+python3 quant_engine.py AAPL MSFT NVDA TSLA --morning --discord
+```
+
+Or fire a per-ticker alert the moment its conviction score clears a threshold
+(instead of waiting for a full `--alerts`/`--morning` report):
+
+```bash
+python3 quant_engine.py AAPL MSFT NVDA TSLA --discord-alerts --discord-threshold 80
+```
+
 ## Example Output
 
 ### Dashboard (Multi-Stock View)

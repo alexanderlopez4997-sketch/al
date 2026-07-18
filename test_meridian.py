@@ -31,6 +31,7 @@ import exchanges as ex
 import websocket_client_v2 as wsc
 from meridian_cache import MeridianCache
 import tui_dashboard as td
+import signal_scoring as ss
 
 _PASS = _FAIL = 0
 _FAILURES = []
@@ -400,6 +401,41 @@ check("catalyst_reasons returns morning.catalyst_score's reasons list", isinstan
 check("account_health averages open-position pnl_pct",
       td.account_health([{"pnl_pct": 10.0}, {"pnl_pct": -2.0}]) == 4.0)
 check("account_health is None with no open positions", td.account_health([]) is None)
+
+section("signal_scoring")
+_r = ss.calculate_final_score("MSFT", 80.0)
+check("no penalties -> predictive_score unchanged", _r["predictive_score"] == 80.0)
+check("no penalties -> empty audit_trail penalties list", _r["audit_trail"]["penalties_applied"] == [])
+check("80 @ default threshold 75 -> STRONG_BUY", _r["status"] == "STRONG_BUY")
+
+_r = ss.calculate_final_score("AAPL", 88.0, insider_activity_90d={"sales_last_30d": 150_000_000})
+check("insider decay halves the score", _r["predictive_score"] == 44.0)
+check("insider decay flagged in alt_data_penalty", _r["alt_data_penalty"]["insider_decay_applied"] is True)
+check("insider decay demotes to ADJUSTED_NEUTRAL", _r["status"] == "ADJUSTED_NEUTRAL")
+
+_r = ss.calculate_final_score("NVDA", 91.0, macro_sentiment=-0.5)
+check("negative macro_sentiment subtracts 10 points", _r["predictive_score"] == 81.0)
+check("macro penalty flagged in alt_data_penalty", _r["alt_data_penalty"]["macro_penalty_applied"] is True)
+check("81 still clears threshold -> STRONG_BUY", _r["status"] == "STRONG_BUY")
+
+_r = ss.calculate_final_score("TSLA", 80.0, insider_activity_90d={"sales_last_30d": 50_000_000})
+check("insider sales under $100M threshold -> no decay", _r["alt_data_penalty"]["insider_decay_applied"] is False)
+check("insider sales under threshold -> score untouched", _r["predictive_score"] == 80.0)
+
+check("intersection filter reads the adjusted score, not the raw technical_score",
+      ss.calculate_final_score("X", 100.0, insider_activity_90d={"sales_last_30d": 150_000_000}
+                                )["status"] == "ADJUSTED_NEUTRAL")
+
+_grid = ss.build_signal_grid([
+    {"ticker": "AAPL", "technical_score": 88.0,
+     "insider_activity_90d": {"sales_last_30d": 150_000_000}, "macro_sentiment": 0.3},
+    {"ticker": "NVDA", "technical_score": 91.0, "macro_sentiment": -0.5},
+])
+check("build_signal_grid returns rowData + columnDefs", set(_grid) == {"columnDefs", "rowData"})
+check("build_signal_grid rowData has one row per input signal", len(_grid["rowData"]) == 2)
+check("build_signal_grid columnDefs include a status column",
+      any(c["field"] == "status" for c in _grid["columnDefs"]))
+check("build_signal_grid rows are JSON-serializable", _json.dumps(_grid["rowData"]))
 
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")

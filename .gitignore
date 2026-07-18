@@ -7,3 +7,4 @@ venv/
 .pytest_cache/
 account_state.json
 rebalance_log.json
+.env
