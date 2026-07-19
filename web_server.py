@@ -29,6 +29,8 @@ import orderflow as of
 import afterhours as ah
 import morning as mb
 import trackrecord as tr
+import websocket_client as wsc
+import aapl_dashboard as ad
 
 PORT = 8787
 TAG = {"txt": "#C9D6E2", "dim": "#6B7E92", "buy": "#2ECC8F", "sell": "#FF5449",
@@ -86,6 +88,9 @@ def _full_analyze(sym, demo, optimize=False):
     return {"ticker": sym, "score": round(res["score"]), "verdict": res["verdict"]["label"],
             "tone": res["verdict"]["tone"], "last": round(res["last"], 2), "chg": round(res["chg"], 2),
             "regime": (res.get("regime") or {}).get("regime", "unknown"),
+            "edge_status": res.get("verdict", {}).get("edge_status", "ACTIVE"),
+            "information_ratio": round(res.get("verdict", {}).get("information_ratio", 0.0), 3),
+            "win_rate": round(res.get("verdict", {}).get("win_rate", 0.5), 3),
             "report": _seg_html(segs)}
 
 
@@ -231,6 +236,30 @@ def _trackrecord_html():
     return {"html": h}
 
 
+# ------------------------------------------------------------ diagnostics ---
+_diag_client = None
+
+def _init_diagnostics(tickers):
+    global _diag_client
+    if _diag_client is None:
+        api_key = os.environ.get("MASSIVE_API_KEY")
+        _diag_client = wsc.get_diagnostics_client(symbols=tickers, api_key=api_key)
+        _diag_client.connect(use_demo=not api_key)
+    return _diag_client
+
+def _diagnostics_json(tickers):
+    client = _init_diagnostics(tickers)
+    diag = client.get_diagnostics()
+    return {
+        "status": diag.get("status", "warming_up"),
+        "timestamp": diag.get("timestamp", ""),
+        "health_status": diag.get("health_status", {}),
+        "factor_irs": diag.get("factor_irs", {}),
+        "correlation_matrix": diag.get("correlation_matrix", {}),
+        "buffers": diag.get("buffers", {})
+    }
+
+
 # ---------------------------------------------------------------- routing ---
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -278,6 +307,28 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._send(json.dumps({"error": str(e)}))
         self._send("not found", "text/plain")
+
+
+# ----------------------------------------------------------- aapl dashboard ---
+def _aapl_dashboard_html(data_points=None):
+    """Generate AAPL dashboard HTML with provided data."""
+    if data_points is None:
+        data_points = [
+            {"timestamp": 1784174400000, "value": 301.6571999999999},
+            {"timestamp": 1784088000000, "value": 300.52859999999987},
+            {"timestamp": 1784001600000, "value": 299.58139999999986},
+            {"timestamp": 1783915200000, "value": 298.7111999999999},
+            {"timestamp": 1783656000000, "value": 297.7683999999999},
+            {"timestamp": 1783569600000, "value": 296.87619999999987},
+            {"timestamp": 1783483200000, "value": 295.9039999999999},
+            {"timestamp": 1783396800000, "value": 295.0573999999999},
+            {"timestamp": 1783310400000, "value": 294.3127999999999},
+            {"timestamp": 1782964800000, "value": 293.5229999999999},
+        ]
+    processor = ad.AAPLDataProcessor(data_points)
+    summary = processor.generate_summary()
+    html = ad.render_dashboard_html(summary)
+    return {"html": html}
 
 
 def _feeds():
@@ -341,6 +392,17 @@ PAGE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  .ohh{display:flex;justify-content:space-between;margin-bottom:6px}.tagpill{font-size:11px;color:var(--amber)}
  .sub{font-size:12px;color:var(--dim);margin-top:3px}.sub a{color:var(--blue,#4F9DE0)}.stat{font-family:ui-monospace,monospace}
  h3{font-size:13px;letter-spacing:1px;margin:16px 0 8px}
+ .diag-panel{display:flex;gap:16px}.diag-col{flex:1}.diag-status{display:flex;align-items:center;gap:10px;padding:14px;border-radius:8px;border:1px solid var(--line);margin-bottom:12px}
+ .diag-regime{font-size:18px;font-weight:700}.regime-bullish{color:var(--buy)}.regime-bearish{color:var(--sell)}.regime-neutral{color:var(--amber)}
+ .ir-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+ .ir-card{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:10px;text-align:center}
+ .ir-symbol{font-size:12px;font-weight:700;color:var(--gold);margin-bottom:4px}
+ .ir-value{font-size:14px;font-family:ui-monospace;font-weight:700}
+ .ir-positive{color:var(--buy)}.ir-negative{color:var(--sell)}.ir-neutral{color:var(--amber)}
+ .corr-table{font-family:ui-monospace;font-size:11px;line-height:1.6;overflow-x:auto}
+ .corr-row{display:flex;gap:8px;margin-bottom:4px}
+ .corr-label{width:100px;color:var(--dim)}.corr-value{width:60px;text-align:right}
+ .buffer-status{font-size:11px;color:var(--dim);margin-top:10px}
  ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
 </style></head><body>
 <div class="top"><span class="diamond">◆</span><div><div class="brand">MERIDIAN</div>
@@ -352,7 +414,7 @@ PAGE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
     <button class="tab active" data-v="dash" onclick="view('dash')">Dashboard</button>
     <button class="tab" data-v="analyze" onclick="view('analyze')">Analyze</button>
     <button class="tab" data-v="screen" onclick="view('screen')">Screener</button>
-    <button class="tab" data-v="mlscreen" onclick="view('mlscreen')">ML Screener</button>
+    <button class="tab" data-v="diag" onclick="view('diag')">Diagnostics</button>
     <button class="tab" data-v="ah" onclick="view('ah')">After-Hours</button>
     <button class="tab" data-v="mb" onclick="view('mb')">Morning</button>
     <button class="tab" data-v="tr" onclick="view('tr')">Track Record</button>
@@ -384,6 +446,7 @@ function view(v){V=v;document.querySelectorAll('.tab').forEach(t=>t.classList.to
  if(v==='dash'){refresh();timer=setInterval(refresh,30000);}
  else if(v==='screen')screen_(); else if(v==='mlscreen')mlscreen_(); else if(v==='ah')load('/api/afterhours','after-hours');
  else if(v==='mb')load('/api/morning','morning brief'); else if(v==='tr')load('/api/trackrecord','track record');
+ else if(v==='diag'){loadDiagnostics();timer=setInterval(loadDiagnostics,5000);}
  else if(v==='analyze')$('main').innerHTML='<div class="muted">Type a ticker → Analyze.</div>';}
 async function refresh(){$('wlnote').textContent='updating…';
  try{const d=await(await fetch('/api/watchlist?demo='+demo()+'&tickers='+wl())).json();
@@ -424,10 +487,29 @@ async function screen_(){$('main').innerHTML='<div class="loader">Screening…</
   if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}
   const f=document.createElement('iframe');f.srcdoc=d.html;$('main').innerHTML='';$('main').appendChild(f);
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
-async function mlscreen_(){$('main').innerHTML='<div class="loader">Building ML models…</div>';
- try{const d=await(await fetch('/api/ml_screen?demo='+demo()+'&tickers='+wl())).json();
+async function loadDiagnostics(){
+ try{const d=await(await fetch('/api/diagnostics?demo='+demo()+'&tickers='+wl())).json();
   if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}
-  const f=document.createElement('iframe');f.srcdoc=d.html;$('main').innerHTML='';$('main').appendChild(f);
+  let h='<div class="diag-panel"><div class="diag-col"><div style="padding:10px 0"><h3>📊 Strategy Health</h3>';
+  const h_status=d.health_status||{};const regime=h_status.regime||'neutral';
+  const regimeClass='regime-'+regime;h+=`<div class="diag-status"><div class="diag-regime ${regimeClass}">${regime.toUpperCase()}</div>
+   <div style="flex:1"><div style="color:var(--dim);font-size:11px">Market Regime</div>
+   <div style="font-size:16px;font-weight:700">Score: ${h_status.score||0}</div></div></div>`;
+  if(d.status==='warming_up'){h+='<div class="muted">Warming up buffers… '+Object.values(d.buffers||{}).map(v=>v+'/20').join(' | ')+'</div>';}
+  h+='</div><div style="padding:10px 0"><h3>💹 Factor Information Ratios</h3><div class="ir-grid">';
+  const irs=d.factor_irs||{};for(const[sym,ir] of Object.entries(irs)){
+   const irClass=ir>1.5?'ir-positive':ir<-1.5?'ir-negative':'ir-neutral';
+   h+=`<div class="ir-card"><div class="ir-symbol">${sym}</div><div class="ir-value ${irClass}">${ir>=0?'+':''}${ir.toFixed(2)}</div></div>`;}
+  h+='</div></div></div><div class="diag-col"><div style="padding:10px 0"><h3>🔗 Correlation Matrix</h3>';
+  const corr=d.correlation_matrix||{};if(Object.keys(corr).length){
+   h+='<div class="corr-table">';for(const[pair,val] of Object.entries(corr)){
+    const corrClass=val>0.5?'buy':val<-0.5?'sell':'dim';const c=corrClass==='buy'?'var(--buy)':corrClass==='sell'?'var(--sell)':'var(--dim)';
+    h+=`<div class="corr-row"><div class="corr-label">${pair}</div><div class="corr-value" style="color:${c}">${val>=0?'+':''}${val.toFixed(2)}</div></div>`;}
+   h+='</div>';}else{h+='<div class="muted">Calculating correlations…</div>';}
+  h+='<div class="buffer-status" style="margin-top:14px;padding-top:10px;border-top:1px solid var(--line)">';
+  h+='<div style="font-size:11px;margin-bottom:6px">Buffer Status (min 20 bars)</div>';
+  for(const[sym,size] of Object.entries(d.buffers||{})){h+=`<div>${sym}: ${size}/20</div>`;}
+  h+='</div></div></div></div>';$('main').innerHTML=h;
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 view('dash');
 </script></body></html>""").replace("__FEEDS__",

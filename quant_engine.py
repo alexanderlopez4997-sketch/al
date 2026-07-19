@@ -23,6 +23,7 @@ optimized weights can overfit (compare train vs unseen-test Sharpe). Past
 patterns do not predict future returns.
 """
 import argparse
+import asyncio
 import hashlib
 import json
 import math
@@ -321,6 +322,8 @@ class MetricsStage:
     """Stage 5: Compute final verdict and performance metrics."""
     @staticmethod
     def execute(data):
+        import edge_tracker as et
+
         score = float(data.comp.iloc[-1])
         last = float(data.d["Close"].iloc[-1])
         atr_pct = float(data.d["atr"].iloc[-1] / last * 100)
@@ -331,12 +334,30 @@ class MetricsStage:
             buy_th = REGIME_THRESHOLDS.get(data.regime["regime"], {}).get("enter", buy_th)
             strong_th = REGIME_THRESHOLDS.get(data.regime["regime"], {}).get("strong", strong_th)
 
-        data.verdict = verdict(score, atr_pct, buy_th, strong_th, data.regime)
+        ir = data.ir.get("Direction") if data.ir else 0.0
+        win_rate = data.F.iloc[-1].mean() if data.F is not None else 0.5
+
+        edge_status = "ACTIVE"
+        factor_id = data.ticker
+
+        check_result, has_edge = et.check_edge(factor_id, ir, win_rate)
+        edge_status = check_result
+
+        if not has_edge:
+            override, track_record = et.track_record_override(factor_id)
+            if override:
+                edge_status = "OVERRIDDEN"
+            else:
+                if score > 0:
+                    score = 0
+
+        data.verdict = verdict(score, atr_pct, buy_th, strong_th, data.regime, edge_status, ir, win_rate)
         data.score = score
         data.last = last
         data.atr_pct = atr_pct
         data.chg = float((last/data.d["Close"].iloc[-2]-1)*100)
         data.conviction = conviction(data.F.iloc[-1], score)
+        data.edge_status = edge_status
         return data
 
 class Pipeline:
@@ -656,7 +677,7 @@ def _anneal_core(FA, ret, ppy, n_iter=500, seed=11, slippage_pct=SLIPPAGE_PCT):
     eq_cache = np.empty(n_ret)
 
     def loss_of(wv):
-        nonlocal pos_diff_cache, strat_cache, eq_cache
+        nonlocal pos_diff_cache, strat_cache, eq_cache  # noqa: F824
         comp = 100.0*(FA @ wv)
         pos = _positions_np(comp)
         strat_cache[0] = 0.0
@@ -780,7 +801,7 @@ def vol_thresholds(ann_vol):
     factor = min(1.8, 1.0 + max(0.0, (ann_vol - 25.0) / 40.0))
     return round(ENTER * factor, 1), round(45.0 * factor, 1)
 
-def verdict(score, atr_pct, buy=ENTER, strong=45.0, regime=None):
+def verdict(score, atr_pct, buy=ENTER, strong=45.0, regime=None, edge_status="ACTIVE", ir=None, win_rate=None):
     if regime and regime.get("confidence", 0) > 0.5:
         buy = REGIME_THRESHOLDS.get(regime["regime"], {}).get("enter", buy)
         strong = REGIME_THRESHOLDS.get(regime["regime"], {}).get("strong", strong)
@@ -790,7 +811,13 @@ def verdict(score, atr_pct, buy=ENTER, strong=45.0, regime=None):
     elif score > -buy: lab, tone = "HOLD / no edge", "neutral"
     elif score > -strong: lab, tone = "AVOID / sell signal", "bad"
     else: lab, tone = "STRONG AVOID", "bad"
-    return {"label": lab, "tone": tone, "risky": bool(atr_pct >= RISKY_ATR_PCT)}
+
+    result = {"label": lab, "tone": tone, "risky": bool(atr_pct >= RISKY_ATR_PCT), "edge_status": edge_status}
+    if ir is not None:
+        result["information_ratio"] = ir
+    if win_rate is not None:
+        result["win_rate"] = win_rate
+    return result
 
 def calibrate_thresholds(comp, close, horizon=5, min_bars=150):
     """Derive per-name BUY/STRONG cutoffs from history instead of the fixed
@@ -1435,6 +1462,8 @@ def analyze_pipeline(ticker, df, interval, account=None, risk_pct=1.0):
         if ns is not None:
             rets = rets.mask(pd.Series(ns, index=data.d.index))
     ann_vol = float(rets.std() * math.sqrt(ppy) * 100)
+    maxdd = float((data.d["Close"]/data.d["Close"].cummax()-1).min()*100)
+    edge_status = data.edge_status if hasattr(data, 'edge_status') else "ACTIVE"
 
     return {
         "ticker": ticker,
@@ -1445,10 +1474,20 @@ def analyze_pipeline(ticker, df, interval, account=None, risk_pct=1.0):
         "stage_5_metrics": {
             "score": data.score, "last": data.last, "chg": data.chg,
             "atr": float(data.d["atr"].iloc[-1]), "atr_pct": data.atr_pct,
-            "ann_vol": ann_vol, "maxdd": float((data.d["Close"]/data.d["Close"].cummax()-1).min()*100),
+            "ann_vol": ann_vol, "maxdd": maxdd,
             "verdict": data.verdict, "conviction": data.conviction,
             "backtest": data.backtest, "backtest_by_regime": data.backtest_by_regime,
-        }
+            "edge_status": edge_status,
+        },
+        # Flat aliases so multi-ticker views (scan/dashboard/categorize_portfolio/
+        # build_morning_briefs, all written against analyze()'s flat shape) can
+        # read a --pipeline result the same way, without pipeline-vs-flat branching
+        # at every call site. report_pipeline() still reads the stage_N_* keys above.
+        "score": data.score, "last": data.last, "chg": data.chg,
+        "atr_pct": data.atr_pct, "ann_vol": ann_vol, "maxdd": maxdd,
+        "verdict": data.verdict, "conviction": data.conviction, "regime": data.regime,
+        "bt": data.backtest, "bt_by_regime": data.backtest_by_regime,
+        "edge_status": edge_status,
     }
 
 def analyze(ticker, df, interval, weights=None, d=None, F=None, calibrate=False):
@@ -1501,8 +1540,39 @@ def analyze(ticker, df, interval, weights=None, d=None, F=None, calibrate=False)
     wr = bt["winrate"]
     ineligible = bool(bt["sharpe"] < 0 or (not math.isnan(wr) and bt["trades"] >= 3 and wr < 0.35))
 
-    vrd = verdict(score, atr_pct, buy_th, strong_th, regime)
+    import edge_tracker as et
+    ir_value = ir.get("Direction", 0.0) if ir else 0.0
+    win_rate = float(wr) if not math.isnan(wr) else 0.5
+    edge_status = "ACTIVE"
+
+    check_result, has_edge = et.check_edge(ticker, ir_value, win_rate)
+    edge_status = check_result
+
+    edge_override = False
+    if not has_edge:
+        override, track_record = et.track_record_override(ticker)
+        if override:
+            edge_status = "OVERRIDDEN"
+            edge_override = True
+        else:
+            if score > 0:
+                score = 0
+
+    vrd = verdict(score, atr_pct, buy_th, strong_th, regime, edge_status, ir_value, win_rate)
     conf = confirmation_checklist(score, vrd, conviction(F.iloc[-1], score), bt, fwd, buy_th, strong_th)
+
+    try:
+        win_count = int(win_rate * bt["trades"]) if not math.isnan(win_rate) and bt["trades"] > 0 else 0
+        loss_count = bt["trades"] - win_count if bt["trades"] > 0 else 0
+        et.log_factor_performance(
+            ticker, win_count, loss_count,
+            bt.get("strategy", 0.0),
+            bt.get("sharpe", 0.0),
+            ir_value,
+            bt.get("maxdd", 0.0)
+        )
+    except Exception:
+        pass
 
     return {"ticker": ticker, "d": d, "F": F, "score": score, "last": last,
             "chg": float((last/d["Close"].iloc[-2]-1)*100),
@@ -1517,7 +1587,92 @@ def analyze(ticker, df, interval, weights=None, d=None, F=None, calibrate=False)
             "intraday": intraday, "calib": calib, "fwd_stats": fwd,
             "limited_history": limited_history, "n_bars": nb,
             "whale_activity": whale_score(d),
-            "regime": regime, "factor_correlation": corr_analysis, "information_ratio": ir}
+            "regime": regime, "factor_correlation": corr_analysis, "information_ratio": ir,
+            "edge_status": edge_status, "edge_override": edge_override}
+
+# ---------------------------------------------------------- service API ---
+# Everything below is the UI-agnostic surface a front end (TUI, web, GUI)
+# should call. It takes plain arguments (ticker, interval) and returns
+# plain-Python primitives — no DataFrames, no numpy scalars — so callers
+# never need to import pandas/numpy just to render a result.
+
+def default_period(interval, day_trade=False):
+    """Lookback long enough for stable signals without exceeding yfinance's
+    per-interval history cap."""
+    if interval == "1d":
+        return "6mo"
+    if interval == "1m":
+        return "2d"
+    if interval in ("2m", "5m"):
+        return "3d" if day_trade else "5d"
+    return "3d" if day_trade else "1mo"
+
+def summarize_analysis(res):
+    """Flatten an analyze() result into JSON-safe primitives for display."""
+    bt = res["bt"]
+    vrd = res["verdict"]
+    conf = res["confirmation"]
+    regime = res["regime"]
+    wr = bt.get("winrate", float("nan"))
+    return {
+        "ticker": res["ticker"],
+        "price": round(res["last"], 4),
+        "chg_pct": round(res["chg"], 3),
+        "score": round(res["score"], 2),
+        "verdict_label": vrd["label"],
+        "verdict_tone": vrd["tone"],
+        "conviction_pct": res["conviction"],
+        "regime": regime.get("regime", "unknown"),
+        "regime_confidence": round(regime.get("confidence", 0.0), 3),
+        "atr_pct": round(res["atr_pct"], 3),
+        "ann_vol": round(res["ann_vol"], 3),
+        "maxdd_pct": round(res["maxdd"], 3),
+        "edge_status": res["edge_status"],
+        "ineligible": bool(res["ineligible"]),
+        "n_bars": int(res["n_bars"]),
+        "backtest_sharpe": round(bt.get("sharpe", 0.0), 3),
+        "backtest_winrate_pct": (round(wr * 100, 1) if not math.isnan(wr) else None),
+        "backtest_trades": int(bt.get("trades", 0)),
+        "confirmation_level": conf["level"],
+        "confirmation_passed": conf["passed"],
+        "confirmation_total": conf["total"],
+    }
+
+class Engine:
+    """Service layer: fetches data and runs the factor/backtest pipeline,
+    returning plain-Python dicts. UI-agnostic — safe to call from a TUI,
+    a web backend, or a script. Blocking I/O (yfinance) and CPU-bound work
+    (pandas/backtest) run in a worker thread so async callers never block
+    their event loop."""
+
+    def __init__(self, day_trade=False, demo=False):
+        self.day_trade = day_trade
+        self.demo = demo   # synthetic data, no network — for offline dev/testing
+
+    async def analyze(self, ticker, interval="1d", period=None):
+        """Analyze one ticker. Returns a summary dict (see summarize_analysis)."""
+        return await asyncio.to_thread(self._analyze_sync, ticker, interval, period)
+
+    def _analyze_sync(self, ticker, interval, period):
+        ticker = ticker.strip().upper()
+        period = period or default_period(interval, self.day_trade)
+        df = demo_data(ticker) if self.demo else fetch(ticker, period, interval)
+        res = analyze(ticker, df, interval, calibrate=True)
+        return summarize_analysis(res)
+
+    async def scan(self, tickers, interval="1d", period=None):
+        """Analyze several tickers concurrently. Returns summaries sorted by
+        score (best signal first); failures are returned as {ticker, error}
+        instead of raising, so one bad symbol doesn't sink the whole scan."""
+        async def one(t):
+            try:
+                return await self.analyze(t, interval, period)
+            except Exception as e:
+                return {"ticker": t.strip().upper(), "error": str(e)}
+
+        results = await asyncio.gather(*(one(t) for t in tickers))
+        results.sort(key=lambda r: r.get("score", float("-inf")), reverse=True)
+        return results
 
 # -------------------------------------------------------------- reports ---
 def reasons(row):
@@ -1952,6 +2107,137 @@ DISCLAIMER = ("Rules-based technical signals on historical data — not financia
               "Backtest ignores fees/slippage and is in-sample; optimized weights can "
               "overfit. Past patterns do not predict future returns.")
 
+# ------------------------------------------------------------- email text ---
+def format_portfolio_alerts_text(results):
+    """Plain-text (no ANSI) rendering of portfolio_alerts(), for email."""
+    categorized = categorize_portfolio(results)
+    lines = ["PORTFOLIO ALERTS - BUY CANDIDATES & RISKS", "=" * 70]
+
+    buy = categorized["buy"]
+    lines.append(f"\nGREEN - BUY CANDIDATES ({len(buy)} stocks)" if buy else
+                 "\nGREEN - BUY CANDIDATES (none)")
+    for r in buy:
+        lines.append(f"  {r['ticker']:<8} {r['score']:+.0f} {r['verdict']['label']}")
+        insiders = r.get("insiders", {})
+        if insiders and insiders.get("buy_usd", 0) > 0:
+            lines.append(f"    Insider buy: ${insiders['buy_usd']/1e6:.1f}M")
+        if r.get("macro_signal", {}).get("signal", 0) > 0.4:
+            lines.append(f"    News tone: {r['macro_signal']['signal']:+.2f}")
+        lines.append(f"    Risk: {r.get('red_flags', {}).get('risk_level', 'MEDIUM')}")
+
+    risk = categorized["risk"]
+    lines.append(f"\nRED - RISK / AVOID ({len(risk)} stocks)" if risk else
+                 "\nRED - RISK / AVOID (none)")
+    for r in risk:
+        lines.append(f"  {r['ticker']:<8} {r['score']:+.0f} {r['verdict']['label']}")
+        red_flags = r.get("red_flags", {})
+        for flag in red_flags.get("flags", [])[:3]:
+            lines.append(f"    - {flag}")
+        lines.append(f"    Risk: {red_flags.get('risk_level', 'UNKNOWN')}")
+
+    neutral = categorized["neutral"]
+    neutral_tickers = ", ".join(r["ticker"] for r in neutral[:10])
+    remaining = f" +{len(neutral)-10} more" if len(neutral) > 10 else ""
+    lines.append(f"\nYELLOW - NEUTRAL ({len(neutral)} stocks)")
+    lines.append(f"  {neutral_tickers}{remaining}")
+
+    lines.append("\n" + DISCLAIMER)
+    return "\n".join(lines)
+
+
+def build_morning_briefs(results, finnhub_key):
+    """Enrich already-analyzed results with overnight signals (after-hours
+    move, insider flow, SEC filings, news sentiment) and rank by catalyst
+    score. Returns a list of morning.catalyst_score() dicts, richest first."""
+    import morning as mb
+    import edgar
+    import sentiment_engine as se
+
+    akey = os.environ.get("ALPACA_API_KEY")
+    asec = os.environ.get("ALPACA_API_SECRET")
+    avkey = os.environ.get("ALPHA_VANTAGE_KEY")
+
+    briefs = []
+    for r in results:
+        t, reg = r["ticker"], r["last"]
+        ahpx = alpaca_latest_trade(t, akey, asec) if (akey and asec) else None
+        ah_chg = (ahpx / reg - 1) * 100 if ahpx else 0.0
+        ins = insider_signal(finnhub_insiders(t, finnhub_key)) if finnhub_key else None
+        try:
+            fil = edgar.recent_filings(t, days=2)
+        except Exception:
+            fil = []
+        sen = None
+        if finnhub_key:
+            try:
+                sen = se.news_sentiment(t, finnhub_key, avkey)
+            except Exception:
+                sen = None
+        b = mb.catalyst_score(r["score"], ah_chg, ins, fil, sen, r.get("whale_activity"))
+        b.update({"ticker": t, "ah_chg": ah_chg, "tech": r["verdict"]["label"]})
+        briefs.append(b)
+    return sorted(briefs, key=lambda b: -b["score"])
+
+
+def format_morning_brief_text(briefs):
+    """Plain-text rendering of a morning brief, for terminal or email."""
+    lines = ["MORNING BRIEF - OVERNIGHT CATALYST SCORE", "=" * 70]
+    buys = [b for b in briefs if b["verdict"] == "BUY candidate"]
+    risks = [b for b in briefs if b["verdict"] == "RISK / avoid"]
+    watch = [b for b in briefs if b["verdict"] not in ("BUY candidate", "RISK / avoid")]
+
+    def block(title, items):
+        out = [f"\n{title} ({len(items)})" if items else f"\n{title} (none)"]
+        for b in items:
+            out.append(f"  {b['ticker']:<8} {b['score']:+d}  chart:{b['tech']}  "
+                        f"ah:{b['ah_chg']:+.1f}%")
+            for text, direction in b["reasons"][:4]:
+                mark = "UP" if direction > 0 else "DOWN" if direction < 0 else "-"
+                out.append(f"    {mark} {text}")
+        return out
+
+    lines += block("BUY CANDIDATES", buys)
+    lines += block("RISK / AVOID", risks)
+    lines += block("WATCH", watch)
+    return "\n".join(lines)
+
+
+def email_report(subject, text_body):
+    """Send text_body to the user's Gmail via mailer.send_email(), printing
+    a status line either way."""
+    import mailer
+    try:
+        recipient = mailer.send_email(subject, text_body)
+        print(dim(f"\nemailed '{subject}' to {recipient}"))
+    except Exception as e:
+        print(rd(f"\nemail failed: {e}"))
+
+
+def discord_report(subject, text_body):
+    """Send text_body to Discord via discord_notify.send_discord(), printing
+    a status line either way."""
+    import discord_notify
+    try:
+        discord_notify.send_discord(f"{subject}\n{text_body}")
+        print(dim(f"\nposted '{subject}' to Discord"))
+    except Exception as e:
+        print(rd(f"\ndiscord post failed: {e}"))
+
+
+def discord_conviction_alert(ticker, verdict_label, conviction_pct, score, threshold):
+    """Fire a per-ticker Discord ping when conviction_pct clears threshold —
+    a no-op silently below it. Uses the same discord_notify.py webhook path
+    as discord_report(), just gated per-ticker instead of one full report."""
+    if conviction_pct < threshold:
+        return
+    import discord_notify
+    message = f"QUANT ENGINE ALERT\n**{ticker}** | Signal: **{verdict_label}** | Conviction: **{conviction_pct}%** ({score:+.0f})"
+    try:
+        discord_notify.send_discord(message)
+        print(dim(f"  -> discord alert: {ticker} conviction {conviction_pct}%"))
+    except Exception as e:
+        print(rd(f"  -> discord alert failed for {ticker}: {e}"))
+
 # ------------------------------------------------------------------ main ---
 def main():
     ap = argparse.ArgumentParser(description="Quant engine — scores stocks, issues buy/hold/avoid verdicts.")
@@ -1965,6 +2251,18 @@ def main():
     ap.add_argument("--pipeline", action="store_true", help="show modular pipeline view (stages 1-5)")
     ap.add_argument("--dashboard", action="store_true", help="show portfolio dashboard view (multi-stock)")
     ap.add_argument("--alerts", action="store_true", help="show portfolio alerts (BUY/RISK categorization)")
+    ap.add_argument("--morning", action="store_true", help="show morning brief (overnight catalyst score ranking)")
+    ap.add_argument("--email", action="store_true",
+                     help="email the --alerts or --morning report via Gmail "
+                          "(requires GMAIL_ADDRESS + GMAIL_APP_PASSWORD env vars)")
+    ap.add_argument("--discord", action="store_true",
+                     help="post the --alerts or --morning report to Discord "
+                          "(requires DISCORD_WEBHOOK_URL env var)")
+    ap.add_argument("--discord-alerts", action="store_true",
+                     help="post a per-ticker Discord alert whenever conviction "
+                          "clears --discord-threshold (requires DISCORD_WEBHOOK_URL env var)")
+    ap.add_argument("--discord-threshold", type=float, default=80.0,
+                     help="conviction %% (0-100) required to fire --discord-alerts (default 80)")
     ap.add_argument("--positions", action="store_true", help="show open/closed positions with live P&L")
     ap.add_argument("--add-position", nargs=2, metavar=("TICKER", "ENTRY_PRICE"), help="add a new position (ticker, entry_price)")
     ap.add_argument("--close-position", nargs=2, metavar=("TICKER", "EXIT_PRICE"), help="close a position (ticker, exit_price)")
@@ -2015,6 +2313,9 @@ def main():
             else:
                 res = analyze(t, df, args.interval, weights)
             results.append((res, opt))
+            if args.discord_alerts:
+                discord_conviction_alert(t, res["verdict"]["label"], res["conviction"],
+                                          res["score"], args.discord_threshold)
         except Exception as e:
             errors.append(f"{t}: {e}")
 
@@ -2038,6 +2339,18 @@ def main():
             update_positions_live(results_list)
         if args.alerts:
             portfolio_alerts(results_list)
+            if args.email:
+                email_report("Portfolio Alerts", format_portfolio_alerts_text(results_list))
+            if args.discord:
+                discord_report("Portfolio Alerts", format_portfolio_alerts_text(results_list))
+        elif args.morning:
+            briefs = build_morning_briefs(results_list, args.finnhub_key)
+            text = format_morning_brief_text(briefs)
+            print(text)
+            if args.email:
+                email_report("Morning Brief", text + "\n\n" + DISCLAIMER)
+            if args.discord:
+                discord_report("Morning Brief", text + "\n\n" + DISCLAIMER)
         elif args.dashboard:
             dashboard(results_list)
         else:
