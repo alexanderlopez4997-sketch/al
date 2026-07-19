@@ -270,6 +270,11 @@ class Handler(BaseHTTPRequestHandler):
                 results = [r for t in tks if (df := data.get(t)) is not None and len(df) >= 60
                            for r in [_try(lambda: g.analyze_prefetched(t, df, "1d"))] if r]
                 return self._send(json.dumps({"html": g.build_screener_html(results, [], "1d", demo, "none")}))
+            if u.path == "/api/ml_screen":
+                data = ({t: qe.demo_data(t) for t in tks} if demo
+                        else g.fetch_many_concurrent(tks, "2y", "1d"))
+                ml_results = g.build_ml_screener_data(tks, data)
+                return self._send(json.dumps({"html": g.build_ml_screener_html(ml_results, demo)}))
         except Exception as e:
             return self._send(json.dumps({"error": str(e)}))
         self._send("not found", "text/plain")
@@ -347,6 +352,7 @@ PAGE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
     <button class="tab active" data-v="dash" onclick="view('dash')">Dashboard</button>
     <button class="tab" data-v="analyze" onclick="view('analyze')">Analyze</button>
     <button class="tab" data-v="screen" onclick="view('screen')">Screener</button>
+    <button class="tab" data-v="mlscreen" onclick="view('mlscreen')">ML Screener</button>
     <button class="tab" data-v="ah" onclick="view('ah')">After-Hours</button>
     <button class="tab" data-v="mb" onclick="view('mb')">Morning</button>
     <button class="tab" data-v="tr" onclick="view('tr')">Track Record</button>
@@ -376,7 +382,7 @@ function view(v){V=v;document.querySelectorAll('.tab').forEach(t=>t.classList.to
  $('wlrow').style.display=(v==='dash'||v==='ah'||v==='mb')?'flex':'none';
  if(timer){clearInterval(timer);timer=null;}
  if(v==='dash'){refresh();timer=setInterval(refresh,30000);}
- else if(v==='screen')screen_(); else if(v==='ah')load('/api/afterhours','after-hours');
+ else if(v==='screen')screen_(); else if(v==='mlscreen')mlscreen_(); else if(v==='ah')load('/api/afterhours','after-hours');
  else if(v==='mb')load('/api/morning','morning brief'); else if(v==='tr')load('/api/trackrecord','track record');
  else if(v==='analyze')$('main').innerHTML='<div class="muted">Type a ticker → Analyze.</div>';}
 async function refresh(){$('wlnote').textContent='updating…';
@@ -415,6 +421,11 @@ async function load(url,name){$('main').innerHTML='<div class="loader">Loading '
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 async function screen_(){$('main').innerHTML='<div class="loader">Screening…</div>';
  try{const d=await(await fetch('/api/screen?demo='+demo()+'&tickers='+wl())).json();
+  if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}
+  const f=document.createElement('iframe');f.srcdoc=d.html;$('main').innerHTML='';$('main').appendChild(f);
+ }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+async function mlscreen_(){$('main').innerHTML='<div class="loader">Building ML models…</div>';
+ try{const d=await(await fetch('/api/ml_screen?demo='+demo()+'&tickers='+wl())).json();
   if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}
   const f=document.createElement('iframe');f.srcdoc=d.html;$('main').innerHTML='';$('main').appendChild(f);
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
