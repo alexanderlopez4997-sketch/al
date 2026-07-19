@@ -240,6 +240,49 @@ def _morning_html(tickers, demo):
             + '<div>' + block("🔴 RISK / AVOID", risks, "#FF5449") + '</div></div>'}
 
 
+# ------------------------------------------------------------- recent news ---
+def _recent_news_html(tickers, demo):
+    """Fetch recent news for watchlist tickers and format as dashboard cards."""
+    if demo:
+        return {"html": '<div class="muted">News disabled in demo mode.</div>'}
+    fkey = qe.FINNHUB_DEFAULT_KEY
+    avk = os.environ.get("ALPHA_VANTAGE_KEY")
+    news_items = []
+
+    def fetch_one(t):
+        try:
+            sent = se.news_sentiment(t, fkey, avk, days=7)
+            if sent and sent.get("n", 0) > 0:
+                news_items.append({"ticker": t, **sent})
+        except Exception:
+            pass
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        list(ex.map(fetch_one, tickers))
+
+    # Sort by confidence * signal magnitude (most impactful first)
+    news_items.sort(key=lambda x: -(abs(x.get("signal", 0)) * x.get("confidence", 0)))
+
+    if not news_items:
+        return {"html": '<div class="muted">No recent news coverage on watchlist.</div>'}
+
+    rows = ""
+    for item in news_items[:8]:  # Show top 8
+        sig = item.get("signal", 0)
+        conf = item.get("confidence", 0)
+        sig_color = "#2ECC8F" if sig > 0.2 else "#FF5449" if sig < -0.2 else "#E0A83B"
+        tag = "POSITIVE" if sig > 0.2 else "NEGATIVE" if sig < -0.2 else "NEUTRAL"
+        defensive = " · ⚠ DEFENSIVE SHIFT" if item.get("defensive_shift") else ""
+        detail = item.get("detail", f"{item.get('n', 0)} articles")
+        rows += (f'<div class="ohcard"><div class="ohh"><b>{item["ticker"]}</b>'
+                f'<span class="tagpill" style="color:{sig_color};">{tag}</span></div>'
+                f'<div class="sub">{detail}{defensive}</div></div>')
+
+    return {"html": f'<div class="grid3">{rows}</div>'
+            + '<div class="muted" style="margin-top:14px">Recent news sentiment across 7 days. '
+            'Defensive shift indicates recent tone deterioration.</div>'}
+
+
 # ------------------------------------------------------------ track record ---
 def _trackrecord_html():
     tickers = sorted({e["ticker"] for e in tr._load()})
@@ -319,6 +362,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(json.dumps(_afterhours_html(tks, demo)))
             if u.path == "/api/morning":
                 return self._send(json.dumps(_morning_html(tks, demo)))
+            if u.path == "/api/news":
+                return self._send(json.dumps(_recent_news_html(tks, demo)))
             if u.path == "/api/trackrecord":
                 return self._send(json.dumps(_trackrecord_html()))
             if u.path == "/api/screen":
@@ -537,15 +582,31 @@ async function screenCategory(cat){$('main').innerHTML='<div class="loader">Scre
   const f=document.createElement('iframe');f.srcdoc=d.html;$('main').innerHTML='';$('main').appendChild(f);
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 async function refresh(){$('wlnote').textContent='updating…';
- try{const d=await(await fetch('/api/watchlist?demo='+demo()+'&tickers='+wl())).json();
-  let h='<div class="wgrid">';for(const r of d){const c=r.tone==='good'?'g':r.tone==='bad'?'b':'n';
+ try{const [d, cats, news]=await Promise.all([
+  fetch('/api/watchlist?demo='+demo()+'&tickers='+wl()).then(r=>r.json()),
+  fetch('/api/categories').then(r=>r.json()),
+  fetch('/api/news?demo='+demo()+'&tickers='+wl()).then(r=>r.json())]);
+  let h='<div style="padding:0"><h2 style="color:var(--gold);margin:0 0 12px;font-size:16px">YOUR WATCHLIST</h2>';
+  h+='<div class="wgrid">';for(const r of d){const c=r.tone==='good'?'g':r.tone==='bad'?'b':'n';
    const cc=r.chg>=0?'var(--buy)':'var(--sell)';
    h+=`<div class="tile ${c}" onclick="$('tk').value='${r.ticker}';view('analyze');go()">
      <span class="sc" style="color:${r.tone==='good'?'var(--buy)':r.tone==='bad'?'var(--sell)':'var(--amber)'}">${r.score>0?'+':''}${r.score}</span>
      <div class="t">${r.ticker} <span style="color:var(--amber)">${r.whale}</span></div>
      <div class="p">${r.last} <span style="color:${cc}">${r.chg>=0?'+':''}${r.chg}%</span></div>
      <div class="v" style="color:${r.tone==='good'?'var(--buy)':r.tone==='bad'?'var(--sell)':'var(--amber)'}">${r.verdict}</div></div>`;}
-  h+='</div>';$('main').innerHTML=h;$('wlnote').textContent='updated '+new Date().toLocaleTimeString();
+  h+='</div>';
+  h+='<h2 style="color:var(--gold);margin:20px 0 12px;font-size:16px">RECENT NEWS & SENTIMENT</h2>';
+  if(news.html){h+=news.html;}else{h+='<div class="muted">No news data available.</div>';}
+  h+='<h2 style="color:var(--gold);margin:20px 0 12px;font-size:16px">DISCOVER BY STRATEGY</h2>';
+  h+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
+  for(const[k,v]of Object.entries(cats)){
+   h+=`<div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;cursor:pointer;transition:all 0.2s" onmouseover="this.style.borderColor='var(--gold)'" onmouseout="this.style.borderColor='var(--line)'" onclick="screenCategory('${k}')">
+    <div style="font-weight:700;font-size:13px;color:var(--gold);margin-bottom:4px;letter-spacing:0.5px">${v.name.toUpperCase()}</div>
+    <div style="font-size:11px;color:var(--dim);line-height:1.4;margin-bottom:8px">${v.desc}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+     <span style="font-size:10px;color:var(--dim)">${v.count} tickers</span>
+     <span style="color:var(--blue);font-weight:700">→</span></div></div>`;}
+  h+='</div></div>';$('main').innerHTML=h;$('wlnote').textContent='updated '+new Date().toLocaleTimeString();
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 async function go(){const t=$('tk').value.trim().toUpperCase()||'NVDA';
  $('main').innerHTML='<div class="loader">Analyzing '+t+'… technicals, fundamentals, alt-data, order flow…</div>';
