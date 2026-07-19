@@ -244,7 +244,24 @@ def _morning_html(tickers, demo):
 def _recent_news_html(tickers, demo):
     """Fetch recent news for watchlist tickers and format as dashboard cards."""
     if demo:
-        return {"html": '<div class="muted">News disabled in demo mode.</div>'}
+        # Demo news data showing the layout
+        demo_news = [
+            {"ticker": "NVDA", "signal": 0.65, "confidence": 0.85, "n": 12, "detail": "12 articles · bullish momentum on AI demand", "defensive_shift": False},
+            {"ticker": "AAPL", "signal": 0.35, "confidence": 0.72, "n": 8, "detail": "8 articles · mixed sentiment on services guidance", "defensive_shift": False},
+            {"ticker": "MSFT", "signal": 0.55, "confidence": 0.90, "n": 15, "detail": "15 articles · strong cloud growth narrative", "defensive_shift": False},
+        ]
+        rows = ""
+        for item in demo_news:
+            sig = item.get("signal", 0)
+            sig_color = "#2ECC8F" if sig > 0.2 else "#FF5449" if sig < -0.2 else "#E0A83B"
+            tag = "POSITIVE" if sig > 0.2 else "NEGATIVE" if sig < -0.2 else "NEUTRAL"
+            defensive = " · ⚠ DEFENSIVE SHIFT" if item.get("defensive_shift") else ""
+            detail = item.get("detail", f"{item.get('n', 0)} articles")
+            rows += (f'<div class="ohcard"><div class="ohh"><b>{item["ticker"]}</b>'
+                    f'<span class="tagpill" style="color:{sig_color};">{tag}</span></div>'
+                    f'<div class="sub">{detail}{defensive}</div></div>')
+        return {"html": f'<div class="grid3">{rows}</div>'
+                + '<div class="muted" style="margin-top:14px">[DEMO] Recent news sentiment across 7 days.</div>'}
     fkey = qe.FINNHUB_DEFAULT_KEY
     avk = os.environ.get("ALPHA_VANTAGE_KEY")
     news_items = []
