@@ -40,9 +40,13 @@ import confirmation as cf
 import leaderboard as lb
 from meridian_cache import MeridianCache
 
-import tkinter as tk
-from tkinter import ttk, font as tkfont
-from tkinter.scrolledtext import ScrolledText
+try:
+    import tkinter as tk
+    from tkinter import ttk, font as tkfont
+    from tkinter.scrolledtext import ScrolledText
+    HAS_TK = True
+except ImportError:
+    HAS_TK = False
 
 BG, PANEL, LINE, TXT, DIM = "#0A0E15", "#10161F", "#232F3D", "#C9D6E2", "#6B7E92"
 PANEL2 = "#161F2B"
@@ -1179,6 +1183,126 @@ def build_report_segments(res, opt, account, risk):
     if v["risky"]: add("  [RISKY]", "sell")
     add(f"   · conviction {res['conviction']}%\n", "dim")
     return seg
+
+
+def build_ml_screener_data(tickers, data):
+    """Train per-ticker ML model to predict next-day direction. Returns list of dicts with
+    predictions, validation accuracy, and real track record for web display."""
+    results = []
+    scored = tr.score(lambda t: data.get(t), horizon=1)
+    tr_by_ticker = {e["ticker"]: e for e in scored}
+    for ticker in tickers:
+        df = data.get(ticker)
+        if df is None or len(df) < 60:
+            continue
+        try:
+            d = df[["Close"]].copy()
+            if "Volume" in df.columns:
+                d["Volume"] = df["Volume"]
+            d["ret"] = d["Close"].pct_change()
+            d["fwd_ret"] = d["ret"].shift(-1)
+            d["label"] = (d["fwd_ret"] > 0).astype(int)
+            d["ema12"] = d["Close"].ewm(12, adjust=False).mean()
+            d["ema20"] = d["Close"].ewm(20, adjust=False).mean()
+            d["ema50"] = d["Close"].ewm(50, adjust=False).mean()
+            d["dist20"] = (d["Close"] - d["ema20"]) / d["ema20"]
+            d["dist50"] = (d["Close"] - d["ema50"]) / d["ema50"]
+            d["rsi"] = qe.rsi(d["Close"], 14)
+            macd12 = d["Close"].ewm(12, adjust=False).mean()
+            macd26 = d["Close"].ewm(26, adjust=False).mean()
+            d["macd"] = macd12 - macd26
+            d["macd_signal"] = d["macd"].ewm(9, adjust=False).mean()
+            d["macd_hist"] = d["macd"] - d["macd_signal"]
+            d["mom"] = d["Close"].pct_change(10)
+            d["vol"] = d["Close"].rolling(20).std() / d["Close"]
+            if "Volume" in d.columns:
+                d["rel_vol"] = d["Volume"] / d["Volume"].rolling(20).mean()
+            d["up_down"] = np.sign(d["ret"])
+            features = ["dist20", "dist50", "rsi", "macd_hist", "mom", "vol"]
+            if "rel_vol" in d.columns:
+                features.append("rel_vol")
+            X = d[features].bfill().ffill().fillna(0).values
+            y = d["label"].values
+            if len(X) < 60 or np.isnan(X).any() or np.isnan(y).any():
+                continue
+            train_size = int(len(X) * 0.65)
+            val_start = train_size
+            val_end = min(train_size + int(len(X) * 0.2), len(X) - 1)
+            X_train, y_train = X[:train_size], y[:train_size]
+            X_val, y_val = X[val_start:val_end], y[val_start:val_end]
+            if len(X_train) < 20 or len(X_val) < 10:
+                continue
+            mean_X = X_train.mean(axis=0)
+            std_X = X_train.std(axis=0)
+            std_X[std_X == 0] = 1.0
+            X_train_norm = (X_train - mean_X) / std_X
+            X_val_norm = (X_val - mean_X) / std_X
+            try:
+                w = np.linalg.lstsq(X_train_norm, y_train, rcond=None)[0]
+                scores_val = X_val_norm @ w
+                pred_val = scores_val > np.median(scores_val)
+                acc_val = (pred_val == y_val).mean()
+                baseline_val = max(y_val.mean(), 1 - y_val.mean())
+            except Exception:
+                continue
+            tr_graded = [e for e in scored if e["ticker"] == ticker and e.get("status") == "scored" and e["win"] is not None]
+            tr_text = ""
+            if len(tr_graded) >= 3:
+                tr_hit = sum(e["win"] for e in tr_graded) / len(tr_graded)
+                tr_ret = np.mean([e.get("fwd_ret", 0) for e in tr_graded])
+                tr_text = f'{len(tr_graded)} past calls, {tr_hit*100:.0f}% actually correct — avg {tr_ret*100:+.1f}%'
+            cur_px = float(df["Close"].iloc[-1])
+            results.append({
+                "ticker": ticker,
+                "pred_pct": int(acc_val * 100),
+                "price": float(cur_px),
+                "acc_val": float(acc_val),
+                "baseline": float(baseline_val),
+                "n_train": int(len(X_train)),
+                "n_val": int(len(X_val)),
+                "tr_text": tr_text,
+                "has_edge": bool(acc_val > baseline_val)
+            })
+        except Exception:
+            continue
+    return sorted(results, key=lambda r: -(r["acc_val"] - r["baseline"] if r["has_edge"] else -999))
+
+
+def build_ml_screener_html(ml_data, demo):
+    """Format ML screener results as HTML for web display."""
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    cards = []
+    for r in ml_data:
+        tr_line = f'<div class="sub">real track record: {r["tr_text"]}</div>' if r["tr_text"] else ""
+        edge_badge = "" if r["has_edge"] else f'<div class="sub" style="color:{SELL}">NO EDGE — {r["acc_val"]*100:.0f}% accurate, worse than the {r["baseline"]*100:.0f}% naive baseline — don\'t trust this prediction</div>'
+        cards.append(f'''<div class="mlcard">
+<div class="mlh"><b>{r["ticker"]}</b><span class="mlpct">{r["pred_pct"]}%</span></div>
+<div class="sub">${r["price"]:.2f} · predicted odds of being up in 1 trading days</div>
+<div class="sub" style="color:{"#2ECC8F" if r["has_edge"] else "#6B7E92"}">validated: {r["acc_val"]*100:.0f}% accurate vs {r["baseline"]*100:.0f}% naive baseline ({r["n_val"]} held-out samples)</div>
+{tr_line}
+{edge_badge}
+<div class="sub" style="color:{DIM}">trained on {r["n_train"]} bars · validated on {r["n_val"]} unseen bars</div>
+</div>''')
+    if not cards:
+        cards = [f'<div style="color:{DIM}">No tickers with sufficient data for ML modeling.</div>']
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>ML Screener</title>
+<style>
+ body{{margin:0;background:{BG};color:{TXT};font-family:-apple-system,Inter,system-ui,sans-serif;padding:20px}}
+ h1{{font-size:20px;margin:0 0 2px}} .sub{{color:{DIM};font-size:12px;margin-top:4px}}
+ .grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}}
+ .mlcard{{background:{PANEL};border:1px solid {LINE};border-radius:8px;padding:12px}}
+ .mlh{{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:8px}}
+ .mlpct{{font-family:ui-monospace,monospace;font-size:16px;font-weight:700;color:{BLUE}}}
+ .disc{{color:{DIM};font-size:11px;margin-top:20px;line-height:1.5;border-top:1px solid {LINE};padding-top:14px}}
+</style></head><body>
+<h1>PREDICTIVE SCREENER</h1>
+<div class="sub">{len(ml_data)} scanned · 2y history · {now}</div>
+<h2 style="margin-top:16px;color:{GOLD};font-size:14px">ML MODEL</h2>
+<div class="sub">Trains a simple linear model per ticker on its own factor history to predict the odds it's up in 1 trading day, then checks the model against data it never trained on. A high win probability from a model that does NOT beat a naive majority-class guess (NO EDGE) is noise, not a signal. Once a ticker has 3+ real graded calls in Track Record, that ACTUAL forward-tested history outranks this run's synthetic validation — real evidence over a fresh backtest.</div>
+<div class="grid">{''.join(cards)}</div>
+<div class="disc">Not financial advice. No model guarantees profit. This trains on past behavior; patterns don't predict the future. Green = validated edge (beats baseline); NO EDGE badge = don't use this signal. Real track record badge shows actual forward-tested calls graded after the verdicts age 5 trading days.</div>
+</body></html>"""
 
 
 # ==========================================================================

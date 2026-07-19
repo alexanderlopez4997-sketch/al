@@ -299,11 +299,11 @@ class Handler(BaseHTTPRequestHandler):
                 results = [r for t in tks if (df := data.get(t)) is not None and len(df) >= 60
                            for r in [_try(lambda: g.analyze_prefetched(t, df, "1d"))] if r]
                 return self._send(json.dumps({"html": g.build_screener_html(results, [], "1d", demo, "none")}))
-            if u.path == "/api/diagnostics":
-                return self._send(json.dumps(_diagnostics_json(tks)))
-            if u.path == "/dashboard/aapl":
-                result = _aapl_dashboard_html()
-                return self._send(result["html"], "text/html; charset=utf-8")
+            if u.path == "/api/ml_screen":
+                data = ({t: qe.demo_data(t) for t in tks} if demo
+                        else g.fetch_many_concurrent(tks, "2y", "1d"))
+                ml_results = g.build_ml_screener_data(tks, data)
+                return self._send(json.dumps({"html": g.build_ml_screener_html(ml_results, demo)}))
         except Exception as e:
             return self._send(json.dumps({"error": str(e)}))
         self._send("not found", "text/plain")
@@ -444,7 +444,7 @@ function view(v){V=v;document.querySelectorAll('.tab').forEach(t=>t.classList.to
  $('wlrow').style.display=(v==='dash'||v==='ah'||v==='mb')?'flex':'none';
  if(timer){clearInterval(timer);timer=null;}
  if(v==='dash'){refresh();timer=setInterval(refresh,30000);}
- else if(v==='screen')screen_(); else if(v==='ah')load('/api/afterhours','after-hours');
+ else if(v==='screen')screen_(); else if(v==='mlscreen')mlscreen_(); else if(v==='ah')load('/api/afterhours','after-hours');
  else if(v==='mb')load('/api/morning','morning brief'); else if(v==='tr')load('/api/trackrecord','track record');
  else if(v==='diag'){loadDiagnostics();timer=setInterval(loadDiagnostics,5000);}
  else if(v==='analyze')$('main').innerHTML='<div class="muted">Type a ticker → Analyze.</div>';}
