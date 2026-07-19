@@ -20,6 +20,10 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from envfile import load_dotenv
+load_dotenv()                                   # populate os.environ from .env before the API-key
+                                                 # constants below are read at import time
+
 import quant_engine as qe
 import quant_gui as g
 import fundamental_engine as fe
