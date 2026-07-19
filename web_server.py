@@ -37,6 +37,34 @@ TAG = {"txt": "#C9D6E2", "dim": "#6B7E92", "buy": "#2ECC8F", "sell": "#FF5449",
        "warn": "#E0A83B", "head": "#E8EEF5", "big": "#FFFFFF", "gold": "#C8A24B",
        "formula": "#E8D9A8", "blue": "#4F9DE0"}
 
+WATCHLIST_CATEGORIES = {
+    "high_beta": {
+        "name": "High-Beta Momentum",
+        "desc": "Volatile stocks where correlations break down — momentum models excel",
+        "tickers": ["TSLA", "AMD", "NVDA", "GME", "RIOT", "MARA"]
+    },
+    "mid_growth": {
+        "name": "Mid-Tier Growth",
+        "desc": "Established growth with good liquidity — sweet spot for ML edge",
+        "tickers": ["AAPL", "MSFT", "AMZN", "GOOGL", "META", "NFLX"]
+    },
+    "value_div": {
+        "name": "Value & Dividend",
+        "desc": "Stable dividend payers with different price drivers",
+        "tickers": ["MRK", "JNJ", "KO", "PG", "UNH", "WMT"]
+    },
+    "fintech": {
+        "name": "Fintech & Emerging Growth",
+        "desc": "Newer, less efficient pricing — higher noise but potential edges",
+        "tickers": ["SOFI", "PLTR", "COIN", "SQ", "HOOD", "UPST"]
+    },
+    "sectors": {
+        "name": "Sector Leaders (ETFs)",
+        "desc": "Diversified sector exposure — broad market patterns",
+        "tickers": ["XLF", "XLK", "XLV", "XLE", "XLI", "XLY"]
+    }
+}
+
 
 def _try(fn, d=None):
     try:
@@ -304,6 +332,46 @@ class Handler(BaseHTTPRequestHandler):
                         else g.fetch_many_concurrent(tks, "2y", "1d"))
                 ml_results = g.build_ml_screener_data(tks, data)
                 return self._send(json.dumps({"html": g.build_ml_screener_html(ml_results, demo)}))
+            if u.path == "/api/categories":
+                cats = [{k: {"name": v["name"], "desc": v["desc"], "count": len(v["tickers"])} for k, v in WATCHLIST_CATEGORIES.items()}]
+                return self._send(json.dumps(cats[0] if cats else {}))
+            if u.path == "/api/category_screen":
+                cat = g1("category", "mid_growth")
+                if cat not in WATCHLIST_CATEGORIES:
+                    return self._send(json.dumps({"error": "Invalid category"}))
+                tks_cat = WATCHLIST_CATEGORIES[cat]["tickers"]
+                data = ({t: qe.demo_data(t) for t in tks_cat} if demo
+                        else g.fetch_many_concurrent(tks_cat, "2y", "1d"))
+                ml_results = g.build_ml_screener_data(tks_cat, data)
+                edges = [r for r in ml_results if r["has_edge"]]
+                no_edges = [r for r in ml_results if not r["has_edge"]]
+                html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>ML Results</title><style>
+body{{margin:0;background:#0A0E15;color:#C9D6E2;font-family:system-ui;padding:20px}}
+.cat{{font-size:24px;font-weight:700;margin-bottom:8px}}
+.desc{{color:#6B7E92;margin-bottom:16px}}
+.stat{{background:#10161F;padding:12px;border-radius:6px;margin-bottom:8px;border-left:3px solid #2ECC8F}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-top:16px}}
+.card{{background:#10161F;border:1px solid #232F3D;border-radius:8px;padding:12px}}
+.tkr{{font-weight:700;font-size:16px;margin-bottom:4px}}
+.acc{{font-family:monospace;color:#4F9DE0;font-weight:700}}
+.edge{{color:#2ECC8F}} .noedge{{color:#FF5449}}
+</style></head><body>
+<div class="cat">{WATCHLIST_CATEGORIES[cat]["name"]}</div>
+<div class="desc">{WATCHLIST_CATEGORIES[cat]["desc"]}</div>
+<div class="stat"><span class="edge">✓ {len(edges)} with EDGE</span> · <span class="noedge">{len(no_edges)} no edge</span> · {len(ml_results)} total</div>
+"""
+                if edges:
+                    html += '<h3 style="margin-top:20px;color:#2ECC8F">Models with Edge</h3><div class="grid">'
+                    for r in edges:
+                        html += f'<div class="card"><div class="tkr">{r["ticker"]}</div><div class="acc">{r["pred_pct"]}% accuracy</div><div style="font-size:12px;color:#6B7E92">vs {r["baseline"]*100:.0f}% baseline</div></div>'
+                    html += '</div>'
+                if no_edges:
+                    html += '<h3 style="margin-top:20px;color:#FF5449">No Edge Detected</h3><div class="grid">'
+                    for r in no_edges:
+                        html += f'<div class="card"><div class="tkr">{r["ticker"]}</div><div style="font-size:12px;color:#6B7E92">{r["pred_pct"]}% vs {r["baseline"]*100:.0f}% baseline</div></div>'
+                    html += '</div>'
+                html += '</body></html>'
+                return self._send(json.dumps({"html": html}))
         except Exception as e:
             return self._send(json.dumps({"error": str(e)}))
         self._send("not found", "text/plain")
@@ -414,6 +482,8 @@ PAGE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
     <button class="tab active" data-v="dash" onclick="view('dash')">Dashboard</button>
     <button class="tab" data-v="analyze" onclick="view('analyze')">Analyze</button>
     <button class="tab" data-v="screen" onclick="view('screen')">Screener</button>
+    <button class="tab" data-v="watchlist" onclick="view('watchlist')">Watchlists</button>
+    <button class="tab" data-v="mlscreen" onclick="view('mlscreen')">ML Screener</button>
     <button class="tab" data-v="diag" onclick="view('diag')">Diagnostics</button>
     <button class="tab" data-v="ah" onclick="view('ah')">After-Hours</button>
     <button class="tab" data-v="mb" onclick="view('mb')">Morning</button>
@@ -444,10 +514,28 @@ function view(v){V=v;document.querySelectorAll('.tab').forEach(t=>t.classList.to
  $('wlrow').style.display=(v==='dash'||v==='ah'||v==='mb')?'flex':'none';
  if(timer){clearInterval(timer);timer=null;}
  if(v==='dash'){refresh();timer=setInterval(refresh,30000);}
- else if(v==='screen')screen_(); else if(v==='mlscreen')mlscreen_(); else if(v==='ah')load('/api/afterhours','after-hours');
+ else if(v==='screen')screen_(); else if(v==='watchlist')watchlist_(); else if(v==='mlscreen')mlscreen_();
+ else if(v==='ah')load('/api/afterhours','after-hours');
  else if(v==='mb')load('/api/morning','morning brief'); else if(v==='tr')load('/api/trackrecord','track record');
  else if(v==='diag'){loadDiagnostics();timer=setInterval(loadDiagnostics,5000);}
  else if(v==='analyze')$('main').innerHTML='<div class="muted">Type a ticker → Analyze.</div>';}
+async function watchlist_(){$('main').innerHTML='<div class="loader">Loading watchlist categories…</div>';
+ try{const cats=await(await fetch('/api/categories')).json();
+  let h='<div style="padding:20px"><h2 style="color:#C8A24B;margin-bottom:16px">Watchlist Categories</h2>';
+  h+='<p style="color:#6B7E92;margin-bottom:20px">Select a category to run ML edge detection across all tickers</p>';
+  h+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">';
+  for(const[k,v]of Object.entries(cats)){
+   h+=`<div style="background:#10161F;border:1px solid #232F3D;border-radius:8px;padding:16px;cursor:pointer" onclick="screenCategory('${k}')">
+    <div style="font-weight:700;font-size:15px;color:#C9D6E2;margin-bottom:4px">${v.name}</div>
+    <div style="font-size:12px;color:#6B7E92;margin-bottom:8px">${v.desc}</div>
+    <div style="font-size:11px;color:#4F9DE0">${v.count} tickers</div></div>`;}
+  h+='</div></div>';$('main').innerHTML=h;
+ }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+async function screenCategory(cat){$('main').innerHTML='<div class="loader">Screening '+cat+' category…</div>';
+ try{const d=await(await fetch('/api/category_screen?category='+cat+'&demo='+demo())).json();
+  if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}
+  const f=document.createElement('iframe');f.srcdoc=d.html;$('main').innerHTML='';$('main').appendChild(f);
+ }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 async function refresh(){$('wlnote').textContent='updating…';
  try{const d=await(await fetch('/api/watchlist?demo='+demo()+'&tickers='+wl())).json();
   let h='<div class="wgrid">';for(const r of d){const c=r.tone==='good'?'g':r.tone==='bad'?'b':'n';
