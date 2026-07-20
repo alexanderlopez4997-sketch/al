@@ -16,6 +16,7 @@ Lexicon sentiment on news flow is a coarse but genuine signal — weighted low a
 capped like every other alt input, never overriding the technical read.
 """
 import hashlib
+import os
 import re
 
 # Curated finance sentiment lexicon (high-signal subset; extend freely).
@@ -159,6 +160,48 @@ def _av_news_sentiment(ticker, av_key, days=7, recent_days=2):
     return _assemble(scored, days, recent_days, "AlphaVantage")
 
 
+def _massive_news_sentiment(ticker, api_key, days=7, recent_days=2, base_url=None):
+    """PRIMARY: Massive's /v2/reference/news — each article carries per-ticker
+    `insights` (positive/negative/neutral) already graded by the provider, so
+    no lexicon guesswork is needed. Massive is the app's primary data provider
+    elsewhere (quotes, exchanges, SIP tape), so prefer it here when a key is
+    configured, ahead of the Alpha Vantage / Finnhub-lexicon fallbacks."""
+    import datetime as _dt
+    import json
+    import time as _t
+    import urllib.request
+    base_url = base_url or os.environ.get("MASSIVE_API_BASE", "https://api.massive.com")
+    url = (f"{base_url}/v2/reference/news?ticker={ticker}&order=desc&limit=50"
+           f"&sort=published_utc&apiKey={api_key}")
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            data = json.loads(r.read().decode())
+    except Exception:
+        return None
+    results = data.get("results") if isinstance(data, dict) else None
+    if not results:
+        return None
+    now = _t.time()
+    _MAP = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}
+    scored = []
+    for art in results:
+        insight = next((i for i in art.get("insights", [])
+                        if i.get("ticker") == ticker and i.get("sentiment") in _MAP), None)
+        if not insight:
+            continue
+        try:
+            pub = art.get("published_utc", "")
+            dtp = _dt.datetime.strptime(pub[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=_dt.timezone.utc)
+            age = max(0.0, (now - dtp.timestamp()) / 86400.0)
+        except Exception:
+            age = 0.0
+        if age > days:
+            continue
+        recency = max(0.1, 1.0 - age / max(days, 1))
+        scored.append((_MAP[insight["sentiment"]], recency, age))
+    return _assemble(scored, days, recent_days, "Massive")
+
+
 def _finnhub_lexicon_sentiment(ticker, key, days=7, recent_days=2):
     """FALLBACK: Finnhub headlines scored by the built-in finance lexicon."""
     articles = fetch_news(ticker, key, days)
@@ -175,10 +218,16 @@ def _finnhub_lexicon_sentiment(ticker, key, days=7, recent_days=2):
     return _assemble(scored, days, recent_days, "lexicon")
 
 
-def news_sentiment(ticker, finnhub_key=None, av_key=None, days=7, recent_days=2):
-    """Aggregate news sentiment. Tries Alpha Vantage's professionally-scored
-    NEWS_SENTIMENT first (relevance-weighted, per-ticker), falls back to Finnhub
+def news_sentiment(ticker, finnhub_key=None, av_key=None, days=7, recent_days=2, massive_key=None):
+    """Aggregate news sentiment. Tries Massive's provider-graded per-ticker
+    insights first (if a key is configured), then Alpha Vantage's
+    NEWS_SENTIMENT (relevance-weighted, per-ticker), falls back to Finnhub
     headlines + the built-in lexicon. Returns dict (see _assemble) or None."""
+    massive_key = massive_key or os.environ.get("MASSIVE_KEY") or os.environ.get("MASSIVE_API_KEY")
+    if massive_key:
+        mv = _massive_news_sentiment(ticker, massive_key, days, recent_days)
+        if mv:
+            return mv
     if av_key:
         av = _av_news_sentiment(ticker, av_key, days, recent_days)
         if av:
