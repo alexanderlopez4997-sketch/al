@@ -160,6 +160,27 @@ class RefinedVolatilityStopEngine:
         )
 
 
+def _get_request_opener():
+    """Create a urllib opener with proper proxy and CA bundle configuration."""
+    import urllib.request
+    import ssl
+
+    ca_bundle = "/root/.ccr/ca-bundle.crt"
+
+    # Create SSL context with CA bundle
+    try:
+        ctx = ssl.create_default_context(cafile=ca_bundle)
+    except:
+        ctx = ssl.create_default_context()
+
+    # Create HTTPS handler with SSL context
+    https_handler = urllib.request.HTTPSHandler(context=ctx)
+
+    # Create opener with HTTPS handler
+    opener = urllib.request.build_opener(https_handler)
+    return opener
+
+
 # Legacy function wrappers for backward compatibility
 def calculate_avoid_stop(
     entry_price: float,
