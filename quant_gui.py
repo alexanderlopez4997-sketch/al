@@ -1382,14 +1382,18 @@ class App:
         feedbar.pack_propagate(False)
         tk.Label(feedbar, text="DATA FEEDS", bg=PANEL2, fg=DIM,
                  font=self.brandsub).pack(side="left", padx=(20, 12))
-        feeds = [("FINNHUB", _finnhub_available()), ("ALPACA·SIP", alpaca_on),
-                 ("QUIVER", bool(os.environ.get("QUIVER_API_TOKEN"))),
-                 ("ALPHA·V", bool(os.environ.get("ALPHA_VANTAGE_KEY"))), ("SEC·EDGAR", _sec_available())]
-        for name, on in feeds:
-            tk.Label(feedbar, text=f"● {name}", bg=PANEL2, fg=(BUY if on else "#3A4657"),
-                     font=self.small).pack(side="left", padx=(0, 14))
+        self.feed_labels = {}
+        feeds_def = [("FINNHUB", _finnhub_available), ("ALPACA·SIP", lambda: alpaca_on),
+                     ("QUIVER", lambda: bool(os.environ.get("QUIVER_API_TOKEN"))),
+                     ("ALPHA·V", lambda: bool(os.environ.get("ALPHA_VANTAGE_KEY"))),
+                     ("SEC·EDGAR", _sec_available)]
+        for name, check_fn in feeds_def:
+            lbl = tk.Label(feedbar, text=f"● {name}", bg=PANEL2, fg=BUY, font=self.small)
+            lbl.pack(side="left", padx=(0, 14))
+            self.feed_labels[name] = (lbl, check_fn)
         self.h_live = tk.Label(feedbar, text="● STREAMING", bg=PANEL2, fg=BUY, font=self.small)
         self.h_live.pack(side="right", padx=(0, 20))
+        self._update_feeds()
         tk.Frame(root, bg=LINE, height=1).pack(fill="x", side="top")
 
         # ---------- footer / status bar ----------
@@ -1465,6 +1469,16 @@ class App:
             self.h_live.configure(text=f"{dot} {'STREAMING' if live else 'IDLE'}",
                                   fg=BUY if live else DIM)
         self.root.after(1000, self._tick_clock)
+
+    def _update_feeds(self):
+        """Update feed status labels (checks connectivity every 30 sec)."""
+        try:
+            for name, (lbl, check_fn) in self.feed_labels.items():
+                on = check_fn()
+                lbl.configure(fg=BUY if on else "#3A4657")
+        except Exception:
+            pass
+        self.root.after(30000, self._update_feeds)
 
     def _build_model(self, tab):
         out = self._out(tab)

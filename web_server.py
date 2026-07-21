@@ -372,7 +372,7 @@ class Handler(BaseHTTPRequestHandler):
             or ["NVDA", "AMD", "AAPL", "MSFT", "TSLA", "GS", "MRK", "AMZN"]
         try:
             if u.path in ("/", "/index.html"):
-                return self._send(PAGE, "text/html; charset=utf-8")
+                return self._send(_get_page(), "text/html; charset=utf-8")
             if u.path == "/api/analyze":
                 return self._send(json.dumps(_full_analyze((g1("ticker", "NVDA") or "NVDA").upper(), demo,
                                                            g1("opt", "0") == "1")))
@@ -484,6 +484,14 @@ def _feeds():
                             headers={"User-Agent": "Meridian Research meridian-app contact@example.com"})}
 
 
+def _get_page():
+    """Build page with live feed status on each request."""
+    f = _feeds()
+    return _PAGE_BASE.replace("__FEEDS__",
+        _pill("FINNHUB", f["finnhub"]) + _pill("ALPACA·SIP", f["alpaca"]) + _pill("QUIVER", f["quiver"])
+        + _pill("ALPHA·V", f["av"]) + _pill("SEC·EDGAR", f["sec"]))
+
+
 def main():
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     url = f"http://127.0.0.1:{PORT}"
@@ -495,9 +503,8 @@ def main():
         srv.shutdown()
 
 
-_F = _feeds()
 _pill = lambda n, on: f'<span class="feed {"on" if on else "off"}">● {n}</span>'
-PAGE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+_PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Meridian Terminal</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
@@ -696,9 +703,7 @@ async function loadDiagnostics(){
   h+='</div></div></div></div>';$('main').innerHTML=h;
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 view('dash');
-</script></body></html>""").replace("__FEEDS__",
-    _pill("FINNHUB", _F["finnhub"]) + _pill("ALPACA·SIP", _F["alpaca"]) + _pill("QUIVER", _F["quiver"])
-    + _pill("ALPHA·V", _F["av"]) + _pill("SEC·EDGAR", _F["sec"]))
+</script></body></html>""")
 
 
 if __name__ == "__main__":
