@@ -467,22 +467,21 @@ def _aapl_dashboard_html(data_points=None):
 
 
 def _feeds():
-    def _sec_available():
+    def _check_url(url, headers=None, timeout=3):
         try:
-            with urllib.request.urlopen(
-                urllib.request.Request("https://www.sec.gov/files/company_tickers.json",
-                                     headers={"User-Agent": "Meridian Research meridian-app contact@example.com"}),
-                timeout=3
-            ) as r:
+            req = urllib.request.Request(url, headers=headers or {})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 r.read()
                 return True
         except Exception:
             return False
 
-    return {"alpaca": bool(os.environ.get("ALPACA_API_KEY") and os.environ.get("ALPACA_API_SECRET")),
+    return {"finnhub": _check_url("https://finnhub.io/api/v1/quote?symbol=AAPL&token=c9c4iyhr01qq7nfq51c0"),
+            "alpaca": bool(os.environ.get("ALPACA_API_KEY") and os.environ.get("ALPACA_API_SECRET")),
             "quiver": bool(os.environ.get("QUIVER_API_TOKEN")),
             "av": bool(os.environ.get("ALPHA_VANTAGE_KEY")),
-            "sec": _sec_available()}
+            "sec": _check_url("https://www.sec.gov/files/company_tickers.json",
+                            headers={"User-Agent": "Meridian Research meridian-app contact@example.com"})}
 
 
 def main():
@@ -698,7 +697,7 @@ async function loadDiagnostics(){
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 view('dash');
 </script></body></html>""").replace("__FEEDS__",
-    _pill("FINNHUB", True) + _pill("ALPACA·SIP", _F["alpaca"]) + _pill("QUIVER", _F["quiver"])
+    _pill("FINNHUB", _F["finnhub"]) + _pill("ALPACA·SIP", _F["alpaca"]) + _pill("QUIVER", _F["quiver"])
     + _pill("ALPHA·V", _F["av"]) + _pill("SEC·EDGAR", _F["sec"]))
 
 

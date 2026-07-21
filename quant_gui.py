@@ -202,19 +202,27 @@ def fetch_daily_cached(cache, tickers, period, interval):
 _INTRADAY_TTL = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "60m": 3600}
 
 
-def _sec_available():
-    """Check if SEC EDGAR API is accessible."""
+def _check_api_url(url, headers=None, timeout=3):
+    """Check if an API endpoint is accessible."""
     try:
         import urllib.request
-        with urllib.request.urlopen(
-            urllib.request.Request("https://www.sec.gov/files/company_tickers.json",
-                                 headers={"User-Agent": "Meridian Research meridian-app contact@example.com"}),
-            timeout=3
-        ) as r:
+        req = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             r.read()
             return True
     except Exception:
         return False
+
+
+def _finnhub_available():
+    """Check if Finnhub API is accessible."""
+    return _check_api_url("https://finnhub.io/api/v1/quote?symbol=AAPL&token=c9c4iyhr01qq7nfq51c0")
+
+
+def _sec_available():
+    """Check if SEC EDGAR API is accessible."""
+    return _check_api_url("https://www.sec.gov/files/company_tickers.json",
+                         headers={"User-Agent": "Meridian Research meridian-app contact@example.com"})
 
 
 class IntradayCache:
@@ -1374,7 +1382,7 @@ class App:
         feedbar.pack_propagate(False)
         tk.Label(feedbar, text="DATA FEEDS", bg=PANEL2, fg=DIM,
                  font=self.brandsub).pack(side="left", padx=(20, 12))
-        feeds = [("FINNHUB", True), ("ALPACA·SIP", alpaca_on),
+        feeds = [("FINNHUB", _finnhub_available()), ("ALPACA·SIP", alpaca_on),
                  ("QUIVER", bool(os.environ.get("QUIVER_API_TOKEN"))),
                  ("ALPHA·V", bool(os.environ.get("ALPHA_VANTAGE_KEY"))), ("SEC·EDGAR", _sec_available())]
         for name, on in feeds:
