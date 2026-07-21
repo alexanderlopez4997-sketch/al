@@ -358,6 +358,9 @@ check("fetch_all_exchanges returns None without an API key", ex.fetch_all_exchan
 _pex = ex.parse_exchanges([{"id": 999, "type": "exchange", "asset_class": "stocks", "locale": "us",
                              "name": "Test Exch", "operating_mic": "TEST", "mic": "TEST", "participant_id": "Q"}])
 check("parse_exchanges round-trips fields", _pex[0].id == 999 and _pex[0].participant_id == "Q")
+check("get_exchange_by_id resolves Nasdaq (id 12)", ex.get_exchange_by_id(12).name == "Nasdaq")
+check("get_exchange_by_id None for unknown id", ex.get_exchange_by_id(9999) is None)
+check("id index covers every bundled row", len(ex.DEFAULT_ID_INDEX) == len(ex.DEFAULT_EXCHANGES))
 
 # ------------------------------------------------- websocket_client_v2 (pure)
 section("websocket_client_v2 · trade processing")
@@ -380,6 +383,19 @@ check("Trade.from_message parses short-key attrs", wsc.Trade.from_message(
 check("Trade.from_message returns None on malformed input", wsc.Trade.from_message(
     type("Msg", (), {"sym": "AAPL", "p": "not-a-number", "s": 1, "c": [], "t": 1})()
 ) is None)
+_ext = wsc.Trade(symbol="TEST", price=100.0, size=1, conditions=[], timestamp=1, exchange=12)
+check("Trade.exchange_name resolves via exchanges module", _ext.exchange_name == "Nasdaq")
+check("Trade.exchange_name is None when exchange is unset", wsc.Trade(
+    symbol="TEST", price=100.0, size=1, conditions=[], timestamp=1).exchange_name is None)
+check("Trade.from_message parses exchange id from short-key 'x'", wsc.Trade.from_message(
+    type("Msg", (), {"sym": "AAPL", "p": 190.5, "s": 100, "c": [], "t": 123, "x": 12})()
+).exchange_name == "Nasdaq")
+
+_client2 = wsc.DiagnosticsWebSocketClient(symbols=["TEST"], max_buffer_size=10)
+_client2._process_trade("TEST", wsc.Trade(symbol="TEST", price=1.0, size=1, conditions=[], timestamp=1, exchange=12))
+check("_process_trade records resolved venue in last_exchange", _client2.last_exchange["TEST"] == "Nasdaq")
+_diag = _client2.get_diagnostics()
+check("get_diagnostics surfaces last_exchange (warming_up)", _diag.last_exchange == {"TEST": "Nasdaq"})
 
 section("tui_dashboard")
 check("parse_watchlist splits and strips", td.parse_watchlist("NVDA, AMD , AAPL") == ["NVDA", "AMD", "AAPL"])

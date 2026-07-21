@@ -15,6 +15,7 @@ from dataclasses import dataclass, asdict
 import numpy as np
 
 import sale_conditions
+import exchanges
 
 # Optional: load environment variables
 try:
@@ -88,17 +89,28 @@ class Trade:
             conditions = getattr(msg, 'conditions', None)
             if conditions is None:
                 conditions = getattr(msg, 'c', None) or []
+            exchange = getattr(msg, 'exchange', None)
+            if exchange is None:
+                exchange = getattr(msg, 'x', None)
             return cls(
                 symbol=str(symbol).upper(),
                 price=float(getattr(msg, 'price', getattr(msg, 'p', 0))),
                 size=int(getattr(msg, 'size', getattr(msg, 's', 0))),
                 conditions=[int(c) for c in conditions],
                 timestamp=int(getattr(msg, 'timestamp', getattr(msg, 't', 0))),
-                exchange=getattr(msg, 'exchange', getattr(msg, 'x', None)),
+                exchange=int(exchange) if exchange is not None else None,
             )
         except (ValueError, AttributeError, TypeError) as e:
             logger.warning(f"Failed to parse trade message: {e}")
             return None
+
+    @property
+    def exchange_name(self) -> Optional[str]:
+        """Reporting venue name, resolved from the raw numeric exchange id."""
+        if self.exchange is None:
+            return None
+        ex = exchanges.get_exchange_by_id(self.exchange)
+        return ex.name if ex else None
 
 
 @dataclass
@@ -111,6 +123,7 @@ class DiagnosticsSnapshot:
     factor_irs: Dict[str, float]
     correlation_matrix: Dict[str, float]
     buffer_sizes: Dict[str, int]
+    last_exchange: Dict[str, Optional[str]]
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -339,6 +352,7 @@ class DiagnosticsWebSocketClient:
         self.buffers: Dict[str, AggregateBuffer] = {
             sym: AggregateBuffer(max_buffer_size) for sym in self.symbols
         }
+        self.last_exchange: Dict[str, Optional[str]] = {sym: None for sym in self.symbols}
         self.calculator = DiagnosticsCalculator()
 
         # Connection state
@@ -411,9 +425,13 @@ class DiagnosticsWebSocketClient:
     def _process_trade(self, symbol: str, trade: Trade) -> None:
         """Classify a trade's sale conditions and fold it into the buffer's
         in-progress bar accordingly. Suppressed conditions (average-price,
-        cash sale, etc.) still count toward volume but never move high/low/close."""
+        cash sale, etc.) still count toward volume but never move high/low/close.
+        Also resolves and records the reporting venue for diagnostics."""
         rules = sale_conditions.classify_trade_by_id(trade.conditions)
         self.buffers[symbol].update_from_trade(trade, rules)
+
+        with self.lock:
+            self.last_exchange[symbol] = trade.exchange_name
 
         if self.message_handler:
             self.message_handler(symbol, trade)
@@ -471,6 +489,7 @@ class DiagnosticsWebSocketClient:
         # volume but never high/low/open/close.
         NORMAL_CONDITIONS = [[], [9], [3]]        # none / Cross Trade / Automatic Execution
         SUPPRESSING_CONDITIONS = [[2], [7]]       # Average Price Trade / Cash Sale
+        DEMO_EXCHANGE_IDS = [e.id for e in exchanges.DEFAULT_EXCHANGES if e.participant_id]
 
         def generate_data():
             logger.info("Starting demo mode with synthetic trades")
@@ -490,6 +509,7 @@ class DiagnosticsWebSocketClient:
                             size=random.randint(100, 5000),
                             conditions=conditions,
                             timestamp=int(time.time() * 1000),
+                            exchange=random.choice(DEMO_EXCHANGE_IDS),
                         )
                         self._process_trade(sym, trade)
 
@@ -571,7 +591,8 @@ class DiagnosticsWebSocketClient:
                     health_score=0,
                     factor_irs={},
                     correlation_matrix={},
-                    buffer_sizes=buffer_sizes
+                    buffer_sizes=buffer_sizes,
+                    last_exchange=dict(self.last_exchange)
                 )
 
             # Calculate metrics
@@ -605,7 +626,8 @@ class DiagnosticsWebSocketClient:
                 health_score=health_score,
                 factor_irs=factor_irs,
                 correlation_matrix=correlation_matrix,
-                buffer_sizes=buffer_sizes
+                buffer_sizes=buffer_sizes,
+                last_exchange=dict(self.last_exchange)
             )
 
     def __del__(self):
@@ -687,5 +709,6 @@ if __name__ == "__main__":
             print(f"Regime: {diag.regime} (score: {diag.health_score})")
             print(f"IRs: {diag.factor_irs}")
             print(f"Buffers: {diag.buffer_sizes}")
+            print(f"Last exchange: {diag.last_exchange}")
     finally:
         client.disconnect()

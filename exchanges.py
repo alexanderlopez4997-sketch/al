@@ -67,8 +67,22 @@ def build_mic_index(exchanges: List[Exchange]) -> Dict[str, Exchange]:
     return {e.mic: e for e in exchanges if e.mic}
 
 
-def fetch_all_exchanges(api_key=None, asset_class="stocks", base_url=None,
-                         timeout=10, max_pages=50):
+def build_id_index(exchanges: List[Exchange]) -> Dict[int, Exchange]:
+    """Index by numeric id — the form real-time trade messages carry in
+    their `exchange` field (mirrors sale_conditions.build_id_index)."""
+    return {e.id: e for e in exchanges}
+
+
+def get_exchange_by_id(exchange_id: int, index: Optional[Dict[int, Exchange]] = None) -> Optional[Exchange]:
+    """Look up the Exchange for a single numeric exchange id from a trade message."""
+    if index is None:
+        index = DEFAULT_ID_INDEX
+    return index.get(exchange_id)
+
+
+def fetch_all_exchanges(
+    api_key=None, asset_class="stocks", base_url=None, timeout=10, max_pages=50
+):
     """Page through the live /v3/reference/exchanges endpoint.
 
     Returns the full List[Exchange], or None if no key is configured or
@@ -163,6 +177,7 @@ _BUNDLED_REFERENCE_RAW = [
 DEFAULT_EXCHANGES: List[Exchange] = parse_exchanges(_BUNDLED_REFERENCE_RAW)
 DEFAULT_PARTICIPANT_INDEX: Dict[str, Exchange] = build_participant_index(DEFAULT_EXCHANGES)
 DEFAULT_MIC_INDEX: Dict[str, Exchange] = build_mic_index(DEFAULT_EXCHANGES)
+DEFAULT_ID_INDEX: Dict[int, Exchange] = build_id_index(DEFAULT_EXCHANGES)
 
 
 def get_exchanges(api_key=None, prefer_live=True) -> List[Exchange]:

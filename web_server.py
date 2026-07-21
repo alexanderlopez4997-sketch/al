@@ -35,7 +35,7 @@ import orderflow as of
 import afterhours as ah
 import morning as mb
 import trackrecord as tr
-import websocket_client as wsc
+import websocket_client_v2 as wsc
 import aapl_dashboard as ad
 
 PORT = 8787
@@ -337,7 +337,7 @@ def _init_diagnostics(tickers):
     global _diag_client
     if _diag_client is None:
         api_key = os.environ.get("MASSIVE_API_KEY")
-        _diag_client = wsc.get_diagnostics_client(symbols=tickers, api_key=api_key)
+        _diag_client = wsc.get_client(symbols=tickers, api_key=api_key)
         _diag_client.connect(use_demo=not api_key)
     return _diag_client
 
@@ -345,12 +345,13 @@ def _diagnostics_json(tickers):
     client = _init_diagnostics(tickers)
     diag = client.get_diagnostics()
     return {
-        "status": diag.get("status", "warming_up"),
-        "timestamp": diag.get("timestamp", ""),
-        "health_status": diag.get("health_status", {}),
-        "factor_irs": diag.get("factor_irs", {}),
-        "correlation_matrix": diag.get("correlation_matrix", {}),
-        "buffers": diag.get("buffers", {})
+        "status": diag.status,
+        "timestamp": diag.timestamp,
+        "health_status": {"regime": diag.regime, "score": diag.health_score},
+        "factor_irs": diag.factor_irs,
+        "correlation_matrix": diag.correlation_matrix,
+        "buffers": diag.buffer_sizes,
+        "last_exchange": diag.last_exchange
     }
 
 
@@ -704,6 +705,11 @@ async function loadDiagnostics(){
   h+='<div class="buffer-status" style="margin-top:14px;padding-top:10px;border-top:1px solid var(--line)">';
   h+='<div style="font-size:11px;margin-bottom:6px">Buffer Status (min 20 bars)</div>';
   for(const[sym,size] of Object.entries(d.buffers||{})){h+=`<div>${sym}: ${size}/20</div>`;}
+  h+='</div>';
+  const lastEx=d.last_exchange||{};
+  h+='<div class="buffer-status" style="margin-top:14px;padding-top:10px;border-top:1px solid var(--line)">';
+  h+='<div style="font-size:11px;margin-bottom:6px">Last Trade Venue</div>';
+  for(const[sym,venue] of Object.entries(lastEx)){h+=`<div>${sym}: ${venue||'—'}</div>`;}
   h+='</div></div></div></div>';$('main').innerHTML=h;
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 view('dash');
