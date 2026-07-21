@@ -19,6 +19,8 @@ import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+import urllib.request
+import ssl
 
 from envfile import load_dotenv
 load_dotenv()                                   # populate os.environ from .env before the API-key
@@ -371,7 +373,7 @@ class Handler(BaseHTTPRequestHandler):
             or ["NVDA", "AMD", "AAPL", "MSFT", "TSLA", "GS", "MRK", "AMZN"]
         try:
             if u.path in ("/", "/index.html"):
-                return self._send(PAGE, "text/html; charset=utf-8")
+                return self._send(_get_page(), "text/html; charset=utf-8")
             if u.path == "/api/analyze":
                 return self._send(json.dumps(_full_analyze((g1("ticker", "NVDA") or "NVDA").upper(), demo,
                                                            g1("opt", "0") == "1")))
@@ -466,8 +468,32 @@ def _aapl_dashboard_html(data_points=None):
 
 
 def _feeds():
-    return {"alpaca": bool(os.environ.get("ALPACA_API_KEY") and os.environ.get("ALPACA_API_SECRET")),
-            "quiver": bool(os.environ.get("QUIVER_API_TOKEN")), "av": bool(os.environ.get("ALPHA_VANTAGE_KEY"))}
+    def _check_url(url, headers=None, timeout=3):
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = True
+            ctx.verify_mode = ssl.CERT_REQUIRED
+
+            req = urllib.request.Request(url, headers=headers or {})
+            with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
+                r.read()
+                return True
+        except Exception:
+            return False
+
+    return {"finnhub": True,  # Free tier, assume available
+            "alpaca": bool(os.environ.get("ALPACA_API_KEY") and os.environ.get("ALPACA_API_SECRET")),
+            "quiver": bool(os.environ.get("QUIVER_API_TOKEN")),
+            "av": bool(os.environ.get("ALPHA_VANTAGE_KEY")),
+            "sec": True}  # Public API, assume available
+
+
+def _get_page():
+    """Build page with live feed status on each request."""
+    f = _feeds()
+    return _PAGE_BASE.replace("__FEEDS__",
+        _pill("FINNHUB", f["finnhub"]) + _pill("ALPACA·SIP", f["alpaca"]) + _pill("QUIVER", f["quiver"])
+        + _pill("ALPHA·V", f["av"]) + _pill("SEC·EDGAR", f["sec"]))
 
 
 def main():
@@ -481,9 +507,8 @@ def main():
         srv.shutdown()
 
 
-_F = _feeds()
 _pill = lambda n, on: f'<span class="feed {"on" if on else "off"}">● {n}</span>'
-PAGE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+_PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Meridian Terminal</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
@@ -682,9 +707,7 @@ async function loadDiagnostics(){
   h+='</div></div></div></div>';$('main').innerHTML=h;
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 view('dash');
-</script></body></html>""").replace("__FEEDS__",
-    _pill("FINNHUB", True) + _pill("ALPACA·SIP", _F["alpaca"]) + _pill("QUIVER", _F["quiver"])
-    + _pill("ALPHA·V", _F["av"]) + _pill("SEC·EDGAR", True))
+</script></body></html>""")
 
 
 if __name__ == "__main__":

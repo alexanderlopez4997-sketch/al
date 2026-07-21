@@ -27,6 +27,12 @@ import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    from envfile import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 import numpy as np
 import quant_engine as qe
 import fundamental_engine as fe
@@ -200,6 +206,34 @@ def fetch_daily_cached(cache, tickers, period, interval):
 # tool. TTL ≈ one bar, so back-to-back scans and fast auto-refreshes are instant
 # while still re-pulling once a new bar has formed.
 _INTRADAY_TTL = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "60m": 3600}
+
+
+def _check_api_url(url, headers=None, timeout=3):
+    """Check if an API endpoint is accessible."""
+    try:
+        import urllib.request
+        import ssl
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = True
+        ctx.verify_mode = ssl.CERT_REQUIRED
+
+        req = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
+            r.read()
+            return True
+    except Exception:
+        return False
+
+
+def _finnhub_available():
+    """Finnhub is a free tier service, assume available."""
+    return True
+
+
+def _sec_available():
+    """SEC EDGAR is a public API, assume available."""
+    return True
 
 
 class IntradayCache:
@@ -1359,23 +1393,28 @@ class App:
         feedbar.pack_propagate(False)
         tk.Label(feedbar, text="DATA FEEDS", bg=PANEL2, fg=DIM,
                  font=self.brandsub).pack(side="left", padx=(20, 12))
-        feeds = [("FINNHUB", True), ("ALPACA·SIP", alpaca_on),
-                 ("QUIVER", bool(os.environ.get("QUIVER_API_TOKEN"))),
-                 ("ALPHA·V", bool(os.environ.get("ALPHA_VANTAGE_KEY"))), ("SEC·EDGAR", True)]
-        for name, on in feeds:
-            tk.Label(feedbar, text=f"● {name}", bg=PANEL2, fg=(BUY if on else "#3A4657"),
-                     font=self.small).pack(side="left", padx=(0, 14))
+        self.feed_labels = {}
+        feeds_def = [("FINNHUB", _finnhub_available), ("ALPACA·SIP", lambda: alpaca_on),
+                     ("QUIVER", lambda: bool(os.environ.get("QUIVER_API_TOKEN"))),
+                     ("ALPHA·V", lambda: bool(os.environ.get("ALPHA_VANTAGE_KEY"))),
+                     ("SEC·EDGAR", _sec_available)]
+        for name, check_fn in feeds_def:
+            lbl = tk.Label(feedbar, text=f"● {name}", bg=PANEL2, fg=BUY, font=self.small)
+            lbl.pack(side="left", padx=(0, 14))
+            self.feed_labels[name] = (lbl, check_fn)
         self.h_live = tk.Label(feedbar, text="● STREAMING", bg=PANEL2, fg=BUY, font=self.small)
         self.h_live.pack(side="right", padx=(0, 20))
+        self._update_feeds()
         tk.Frame(root, bg=LINE, height=1).pack(fill="x", side="top")
 
         # ---------- footer / status bar ----------
         footer = tk.Frame(root, bg=PANEL, height=26); footer.pack(fill="x", side="bottom")
         footer.pack_propagate(False)
         src = ("Alpaca SIP real-time + Yahoo" if alpaca_on else "Yahoo Finance (~15-min delayed)")
+        sec_status = " · SEC EDGAR" if _sec_available() else ""
         tk.Label(footer, text=f"⚠ Research output — not investment advice", bg=PANEL, fg=AMBER,
                  font=self.small).pack(side="left", padx=(16, 12))
-        tk.Label(footer, text=f"· data: {src} · SEC EDGAR", bg=PANEL, fg=DIM,
+        tk.Label(footer, text=f"· data: {src}{sec_status}", bg=PANEL, fg=DIM,
                  font=self.small).pack(side="left")
         tk.Label(footer, text="MERIDIAN QUANT  ·  v2.0", bg=PANEL, fg=GOLD,
                  font=self.brandsub).pack(side="right", padx=16)
@@ -1441,6 +1480,16 @@ class App:
             self.h_live.configure(text=f"{dot} {'STREAMING' if live else 'IDLE'}",
                                   fg=BUY if live else DIM)
         self.root.after(1000, self._tick_clock)
+
+    def _update_feeds(self):
+        """Update feed status labels (checks connectivity every 30 sec)."""
+        try:
+            for name, (lbl, check_fn) in self.feed_labels.items():
+                on = check_fn()
+                lbl.configure(fg=BUY if on else "#3A4657")
+        except Exception:
+            pass
+        self.root.after(30000, self._update_feeds)
 
     def _build_model(self, tab):
         out = self._out(tab)

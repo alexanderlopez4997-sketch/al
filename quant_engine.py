@@ -33,6 +33,7 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import stops
 
 # --------------------------------------------------------------- colors ---
 COLOR = sys.stdout.isatty()
@@ -921,15 +922,70 @@ def whale_score(d, rvol_flag=1.5, cmf_flag=0.05):
             "whale": bool(rvol >= rvol_flag and abs(cmf) >= cmf_flag),
             "signal": float(np.clip(np.sign(cmf) * mag, -1.0, 1.0))}
 
-def position_size(price, atr_val, account, risk_pct, stop_mult=2.0):
-    # stop_mult defaults to 2×ATR; a defensive news-tone shift tightens it (e.g. 1.5).
-    stop = stop_mult*atr_val
-    if not (stop > 0) or not (price > 0): return None
-    shares = min(int((account*risk_pct/100.0)//stop), int(account//price))
-    if shares <= 0: return None
-    return {"shares": shares, "entry": price, "stop": price-stop,
-            "target": price+2*stop, "risk_dollars": shares*stop, "notional": shares*price,
-            "reward_dollars": shares*2*stop, "stop_mult": stop_mult}
+def position_size(price, atr_val, account, risk_pct, stop_mult=2.0, signal_type=None, **kwargs):
+    """
+    Calculate position sizing with entry, stop, and target.
+
+    Args:
+        price: Entry price
+        atr_val: 14-bar ATR
+        account: Account size
+        risk_pct: Risk per trade (%)
+        stop_mult: ATR multiplier for stop (default 2.0, ignored if signal_type used)
+        signal_type: "buy", "avoid", "ml" — uses stops.py strategies if specified
+        **kwargs: Additional args for signal-specific stop calculators
+                  (e.g. high_lookback, bar_true_range for "avoid"; confidence for "ml")
+
+    Returns:
+        Dict with shares, entry, stop, target, risk_dollars, notional, reward_dollars
+    """
+    # Use signal-specific stop calculation if provided
+    if signal_type == "buy" and atr_val > 0:
+        stop_price = stops.calculate_buy_stop(price, atr_val, risk_multiplier=stop_mult)
+    elif signal_type == "avoid":
+        current_price = kwargs.get("current_price", price)
+        high_lookback = kwargs.get("high_lookback", price)
+        bar_true_range = kwargs.get("bar_true_range", atr_val)
+        bars_in_trade = kwargs.get("bars_in_trade", 0)
+        stop_price, _ = stops.calculate_avoid_stop(
+            price, current_price, high_lookback, atr_val, bar_true_range, bars_in_trade
+        )
+    elif signal_type == "ml":
+        confidence = kwargs.get("confidence", 0.7)
+        stop_price = stops.calculate_ml_stop(price, confidence, atr_val)
+    else:
+        # Fallback to simple ATR-based stop
+        stop_distance = stop_mult * atr_val
+        stop_price = price - stop_distance
+
+    if not (stop_price > 0) or not (price > 0):
+        return None
+
+    stop_distance = abs(price - stop_price)
+    if stop_distance == 0:
+        return None
+
+    shares = stops.calculate_position_size(account, price, stop_price, risk_pct / 100.0)
+    shares = int(shares)
+
+    if shares <= 0:
+        return None
+
+    risk_dollars = shares * stop_distance
+    notional = shares * price
+    reward_dollars = shares * (2 * stop_distance)
+
+    return {
+        "shares": shares,
+        "entry": price,
+        "stop": stop_price,
+        "target": price + 2 * stop_distance,
+        "risk_dollars": risk_dollars,
+        "notional": notional,
+        "reward_dollars": reward_dollars,
+        "stop_mult": stop_mult,
+        "signal_type": signal_type
+    }
 
 # ------------------------------------------------------------------ data ---
 def fetch(ticker, period, interval):
