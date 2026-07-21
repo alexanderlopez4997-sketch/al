@@ -27,6 +27,12 @@ import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    from envfile import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 import numpy as np
 import quant_engine as qe
 import fundamental_engine as fe
