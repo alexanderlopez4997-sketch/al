@@ -19,6 +19,7 @@ import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+import urllib.request
 
 from envfile import load_dotenv
 load_dotenv()                                   # populate os.environ from .env before the API-key
@@ -466,8 +467,22 @@ def _aapl_dashboard_html(data_points=None):
 
 
 def _feeds():
+    def _sec_available():
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request("https://www.sec.gov/files/company_tickers.json",
+                                     headers={"User-Agent": "Meridian Research meridian-app contact@example.com"}),
+                timeout=3
+            ) as r:
+                r.read()
+                return True
+        except Exception:
+            return False
+
     return {"alpaca": bool(os.environ.get("ALPACA_API_KEY") and os.environ.get("ALPACA_API_SECRET")),
-            "quiver": bool(os.environ.get("QUIVER_API_TOKEN")), "av": bool(os.environ.get("ALPHA_VANTAGE_KEY"))}
+            "quiver": bool(os.environ.get("QUIVER_API_TOKEN")),
+            "av": bool(os.environ.get("ALPHA_VANTAGE_KEY")),
+            "sec": _sec_available()}
 
 
 def main():
@@ -684,7 +699,7 @@ async function loadDiagnostics(){
 view('dash');
 </script></body></html>""").replace("__FEEDS__",
     _pill("FINNHUB", True) + _pill("ALPACA·SIP", _F["alpaca"]) + _pill("QUIVER", _F["quiver"])
-    + _pill("ALPHA·V", _F["av"]) + _pill("SEC·EDGAR", True))
+    + _pill("ALPHA·V", _F["av"]) + _pill("SEC·EDGAR", _F["sec"]))
 
 
 if __name__ == "__main__":

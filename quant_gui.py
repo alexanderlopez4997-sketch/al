@@ -202,6 +202,21 @@ def fetch_daily_cached(cache, tickers, period, interval):
 _INTRADAY_TTL = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "60m": 3600}
 
 
+def _sec_available():
+    """Check if SEC EDGAR API is accessible."""
+    try:
+        import urllib.request
+        with urllib.request.urlopen(
+            urllib.request.Request("https://www.sec.gov/files/company_tickers.json",
+                                 headers={"User-Agent": "Meridian Research meridian-app contact@example.com"}),
+            timeout=3
+        ) as r:
+            r.read()
+            return True
+    except Exception:
+        return False
+
+
 class IntradayCache:
     """Short-TTL intraday price cache: in-memory + disk-backed, so reloads AND
     app restarts within one bar period skip the (uncached, flaky) Yahoo download.
@@ -1361,7 +1376,7 @@ class App:
                  font=self.brandsub).pack(side="left", padx=(20, 12))
         feeds = [("FINNHUB", True), ("ALPACA·SIP", alpaca_on),
                  ("QUIVER", bool(os.environ.get("QUIVER_API_TOKEN"))),
-                 ("ALPHA·V", bool(os.environ.get("ALPHA_VANTAGE_KEY"))), ("SEC·EDGAR", True)]
+                 ("ALPHA·V", bool(os.environ.get("ALPHA_VANTAGE_KEY"))), ("SEC·EDGAR", _sec_available())]
         for name, on in feeds:
             tk.Label(feedbar, text=f"● {name}", bg=PANEL2, fg=(BUY if on else "#3A4657"),
                      font=self.small).pack(side="left", padx=(0, 14))
@@ -1373,9 +1388,10 @@ class App:
         footer = tk.Frame(root, bg=PANEL, height=26); footer.pack(fill="x", side="bottom")
         footer.pack_propagate(False)
         src = ("Alpaca SIP real-time + Yahoo" if alpaca_on else "Yahoo Finance (~15-min delayed)")
+        sec_status = " · SEC EDGAR" if _sec_available() else ""
         tk.Label(footer, text=f"⚠ Research output — not investment advice", bg=PANEL, fg=AMBER,
                  font=self.small).pack(side="left", padx=(16, 12))
-        tk.Label(footer, text=f"· data: {src} · SEC EDGAR", bg=PANEL, fg=DIM,
+        tk.Label(footer, text=f"· data: {src}{sec_status}", bg=PANEL, fg=DIM,
                  font=self.small).pack(side="left")
         tk.Label(footer, text="MERIDIAN QUANT  ·  v2.0", bg=PANEL, fg=GOLD,
                  font=self.brandsub).pack(side="right", padx=16)
