@@ -336,7 +336,13 @@ class MetricsStage:
             strong_th = REGIME_THRESHOLDS.get(data.regime["regime"], {}).get("strong", strong_th)
 
         ir = data.ir.get("Direction") if data.ir else 0.0
-        win_rate = data.F.iloc[-1].mean() if data.F is not None else 0.5
+        # win_rate must be the backtested hit-rate: check_edge() compares it to
+        # EDGE_THRESHOLD_WINRATE (0.50). The latest factor-row mean (~[-1,1], usually
+        # well under 0.5) is not a win rate, so it made check_edge reject every name
+        # and fall through to the track-record override — spurious "OVERRIDDEN"
+        # everywhere. Use the backtest winrate, matching screen_one()'s edge path.
+        _wr = data.backtest.get("winrate", float("nan")) if getattr(data, "backtest", None) else float("nan")
+        win_rate = float(_wr) if not math.isnan(_wr) else 0.5
 
         edge_status = "ACTIVE"
         factor_id = data.ticker
@@ -1617,18 +1623,14 @@ def analyze(ticker, df, interval, weights=None, d=None, F=None, calibrate=False)
     vrd = verdict(score, atr_pct, buy_th, strong_th, regime, edge_status, ir_value, win_rate)
     conf = confirmation_checklist(score, vrd, conviction(F.iloc[-1], score), bt, fwd, buy_th, strong_th)
 
-    try:
-        win_count = int(win_rate * bt["trades"]) if not math.isnan(win_rate) and bt["trades"] > 0 else 0
-        loss_count = bt["trades"] - win_count if bt["trades"] > 0 else 0
-        et.log_factor_performance(
-            ticker, win_count, loss_count,
-            bt.get("strategy", 0.0),
-            bt.get("sharpe", 0.0),
-            ir_value,
-            bt.get("maxdd", 0.0)
-        )
-    except Exception:
-        pass
+    # NOTE: analyze() must stay a pure function of the input bars. It used to log
+    # its OWN in-sample backtest here (win_count derived from bt["winrate"]) into
+    # the persistent track-record DB, which track_record_override() then read back
+    # and averaged. That was circular — the same backtest that drives the edge
+    # check got re-logged daily as if it were realized trades, so OVERRIDDEN fired
+    # purely from having run the analysis before, and results shifted run-to-run.
+    # The track record must be fed by genuine closed trades, not by re-logging the
+    # backtest, so the self-log is removed.
 
     return {"ticker": ticker, "d": d, "F": F, "score": score, "last": last,
             "chg": float((last/d["Close"].iloc[-2]-1)*100),
