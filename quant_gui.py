@@ -47,6 +47,12 @@ import leaderboard as lb
 from meridian_cache import MeridianCache
 
 try:
+    from adaptive_engine import SubFactorAlignmentFilter, WhaleFootprintGate
+    HAS_ADAPTIVE = True
+except ImportError:
+    HAS_ADAPTIVE = False
+
+try:
     import tkinter as tk
     from tkinter import ttk, font as tkfont
     from tkinter.scrolledtext import ScrolledText
@@ -469,10 +475,56 @@ def fetch_movers(limit=100):
     return None
 
 
+def apply_adaptive_gates(res):
+    """Elevate sub-factor alignment and whale distribution pressure from
+    descriptive metadata to an active pre-score gate. If a would-be BUY
+    (score > 0) has misaligned sub-factors (< 66% directional consensus)
+    or abnormal volume paired with net negative money flow, the score is
+    suppressed to 0 and the verdict overridden — mirroring the existing
+    NO_EDGE suppression pattern already used for edge_status."""
+    gate = {"checked": HAS_ADAPTIVE, "vetoed": False, "reasons": []}
+    if not HAS_ADAPTIVE:
+        res["adaptive_gate"] = gate
+        return res
+
+    F = res.get("F")
+    if F is not None and len(F):
+        gate["alignment"] = SubFactorAlignmentFilter(min_consensus=0.66).compute_alignment(F.iloc[-1])
+
+    whale = res.get("whale_activity")
+    if whale:
+        _, whale_veto, whale_reason = WhaleFootprintGate().apply_whale_gate(whale, res.get("score", 0.0))
+        gate["whale"] = {"vetoed": whale_veto, "reason": whale_reason}
+
+    would_buy = res.get("score", 0.0) > 0
+    misaligned = bool(gate.get("alignment") and not gate["alignment"]["aligned"])
+    whale_veto = bool(gate.get("whale", {}).get("vetoed"))
+
+    if would_buy and (misaligned or whale_veto):
+        gate["vetoed"] = True
+        if misaligned:
+            gate["reasons"].append(f"sub-factor misalignment ({gate['alignment']['vetoed_reason']})")
+        if whale_veto:
+            gate["reasons"].append(gate["whale"]["reason"])
+
+        gate["pre_gate_score"] = res["score"]
+        res["score"] = 0.0
+        primary = "WHALE VETO" if whale_veto else "MISALIGNED FACTORS"
+        vrd = qe.verdict(0.0, res["atr_pct"], res.get("buy_th", qe.ENTER),
+                          res.get("strong_th", 45.0), res.get("regime"), "GATED")
+        vrd["label"] = f"ADAPTIVE GATE — {primary}"
+        vrd["tone"] = "bad"
+        res["verdict"] = vrd
+
+    res["adaptive_gate"] = gate
+    return res
+
+
 def analyze_prefetched(ticker, df, interval):
     res = qe.analyze(ticker, df, interval, None)
     res["dollar_vol"] = dollar_volume(res["d"])
     res["opt"] = None
+    apply_adaptive_gates(res)
     return res
 
 
@@ -652,6 +704,7 @@ def screen_one(ticker, demo, period, interval, optimize, cache=None, realtime_ke
     res["dollar_vol"] = dollar_volume(res["d"])
     res["opt"] = opt
     res["quote"] = quote
+    apply_adaptive_gates(res)
     return res
 
 
@@ -1076,6 +1129,25 @@ def build_report_segments(res, opt, account, risk):
             add(f"  ↳ abnormal volume with {w['direction']} pressure — big money is active "
                 f"(who/why is unknowable)\n", "dim")
         add("\n", "txt")
+    ag = res.get("adaptive_gate")
+    if ag and ag.get("checked") and (ag.get("vetoed") or ag.get("alignment")):
+        add("ADAPTIVE GATES ", "head")
+        add("(pre-score consensus + whale veto — active, not descriptive)\n", "dim")
+        al = ag.get("alignment")
+        if al:
+            atag = "buy" if al["aligned"] else "sell"
+            add(f"  sub-factor consensus {al['consensus_pct']*100:.0f}% "
+                f"({al['n_agreeing']}/{al['n_factors']} agree)", atag)
+            add("  ALIGNED\n" if al["aligned"] else "  MISALIGNED\n", atag)
+        wg = ag.get("whale")
+        if wg:
+            wtag = "sell" if wg["vetoed"] else "dim"
+            add(f"  whale gate: {'VETO' if wg['vetoed'] else 'clear'}", wtag)
+            add(f"  {wg['reason']}\n" if wg["reason"] else "\n", "dim")
+        if ag["vetoed"]:
+            add(f"  🚫 score suppressed {ag['pre_gate_score']:+.0f} → 0 — "
+                + "; ".join(ag["reasons"]) + "\n", "sell")
+        add("\n", "txt")
     fl = res.get("orderflow")
     if fl and fl.get("n_blocks"):
         add("DARK-POOL BLOCK FLOW ", "head"); add("(FINRA TRF via SIP · recent session)\n", "dim")
@@ -1215,6 +1287,7 @@ def build_report_segments(res, opt, account, risk):
     add("─" * 52 + "\n", "dim"); add("VERDICT  ", "head"); add(f"score {res['score']:+.0f}   ", "txt")
     add(v["label"], vtag)
     if v["risky"]: add("  [RISKY]", "sell")
+    if ag and ag.get("vetoed"): add("  [GATED]", "sell")
     add(f"   · conviction {res['conviction']}%\n", "dim")
     return seg
 

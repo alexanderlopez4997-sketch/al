@@ -37,7 +37,7 @@ def example_1_basic_adaptive_scoring():
     print("="*70)
 
     # Simulated factor data (from quant_engine.factor_matrix())
-    dates = pd.date_range(end=datetime.now(), periods=100, freq="1d")
+    dates = pd.date_range(end=datetime.now(), periods=100, freq="D")
     factors = pd.DataFrame({
         "Direction": np.sin(np.linspace(0, 4*np.pi, 100)) + np.random.randn(100)*0.1,
         "Momentum": np.cos(np.linspace(0, 4*np.pi, 100)) + np.random.randn(100)*0.1,
@@ -77,7 +77,7 @@ def example_2_volatility_adaptive_thresholds():
     print("="*70)
 
     # Create two price series: one stable, one volatile
-    dates = pd.date_range(end=datetime.now(), periods=252, freq="1d")
+    dates = pd.date_range(end=datetime.now(), periods=252, freq="D")
 
     stable_prices = pd.Series(
         100 + np.cumsum(np.random.randn(252) * 0.5),
@@ -309,7 +309,7 @@ def example_6_full_adaptive_pipeline():
     print("="*70)
 
     # Create synthetic data
-    dates = pd.date_range(end=datetime.now(), periods=100, freq="1d")
+    dates = pd.date_range(end=datetime.now(), periods=100, freq="D")
 
     factors = pd.DataFrame({
         "Direction": np.sin(np.linspace(0, 4*np.pi, 100)) + np.random.randn(100)*0.1,

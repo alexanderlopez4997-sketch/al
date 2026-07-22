@@ -28,7 +28,7 @@ from quant_engine_extensions import AdaptiveComposite, adaptive_verdict
 
 def generate_synthetic_factors(n_bars=300, regime="bull"):
     """Generate synthetic factor data for testing."""
-    dates = pd.date_range(end=datetime.now(), periods=n_bars, freq="1d")
+    dates = pd.date_range(end=datetime.now(), periods=n_bars, freq="D")
 
     if regime == "bull":
         direction = np.sin(np.linspace(0, 4*np.pi, n_bars)) + np.random.randn(n_bars)*0.1
@@ -58,7 +58,7 @@ def generate_synthetic_factors(n_bars=300, regime="bull"):
 
 def generate_synthetic_prices(n_bars=300, vol_regime="normal", base_price=100):
     """Generate synthetic price series."""
-    dates = pd.date_range(end=datetime.now(), periods=n_bars, freq="1d")
+    dates = pd.date_range(end=datetime.now(), periods=n_bars, freq="D")
 
     if vol_regime == "normal":
         daily_ret = np.random.randn(n_bars) * 0.01  # 1% daily
@@ -198,16 +198,27 @@ class TestSubFactorAlignmentFilter(unittest.TestCase):
         self.assertGreaterEqual(alignment["consensus_pct"], self.filter.min_consensus)
 
     def test_misaligned_factors(self):
-        """Test detection of misaligned factors."""
+        """Test detection of misaligned factors (an even 2-2 split, like the
+        real QQQ case: bullish Direction/MeanRev vs. bearish Momentum/Volume)."""
         misaligned_row = pd.Series({
             "Direction": 0.8,
             "Momentum": -0.7,
             "Volume": -0.6,
-            "MeanRev": -0.5,  # 3 negative, 1 positive → 25% consensus
+            "MeanRev": 0.5,  # 2 positive, 2 negative → 50% consensus
         })
         alignment = self.filter.compute_alignment(misaligned_row)
         self.assertFalse(alignment["aligned"])
         self.assertLess(alignment["consensus_pct"], self.filter.min_consensus)
+
+    def test_majority_consensus_is_aligned(self):
+        """A 3-1 split has 75% consensus on the dominant direction — this
+        counts as aligned even though one factor dissents."""
+        row = pd.Series({
+            "Direction": 0.8, "Momentum": -0.7, "Volume": -0.6, "MeanRev": -0.5,
+        })
+        alignment = self.filter.compute_alignment(row)
+        self.assertTrue(alignment["aligned"])
+        self.assertAlmostEqual(alignment["consensus_pct"], 0.75)
 
     def test_apply_filter_to_dataframe(self):
         """Test filtering across entire dataframe."""
@@ -220,12 +231,18 @@ class TestSubFactorAlignmentFilter(unittest.TestCase):
         self.assertTrue((filtered == 0).any().any())
 
     def test_no_veto_on_aligned_data(self):
-        """Test minimal vetoes on well-aligned data."""
-        factors = generate_synthetic_factors(n_bars=300, regime="bull")
-        filtered, stats = self.filter.apply_filter(factors)
+        """Test fewer vetoes on well-aligned data than on the fully-mixed
+        fixture. Note the "bull" fixture only correlates Direction/Momentum;
+        Volume/MeanRev are independent noise, so some veto rate is expected —
+        this checks it's meaningfully lower than the "mixed" (all-independent)
+        fixture, not near-zero."""
+        aligned_factors = generate_synthetic_factors(n_bars=300, regime="bull")
+        mixed_factors = generate_synthetic_factors(n_bars=300, regime="mixed")
 
-        # Bull regime data should be mostly aligned
-        self.assertLess(stats["veto_pct"], 30)
+        _, aligned_stats = self.filter.apply_filter(aligned_factors)
+        _, mixed_stats = self.filter.apply_filter(mixed_factors)
+
+        self.assertLess(aligned_stats["veto_pct"], mixed_stats["veto_pct"])
 
 
 class TestWhaleFootprintGate(unittest.TestCase):
@@ -385,7 +402,7 @@ class TestIntegration(unittest.TestCase):
             alignment_healthy=True,
         )
 
-        self.assertIn("whale", result["label"].lower() or "veto" in result["label"].lower())
+        self.assertTrue("whale" in result["label"].lower() or "veto" in result["label"].lower())
         self.assertEqual(result["tone"], "veto")
 
     def test_adaptive_verdict_with_misalignment(self):
@@ -397,7 +414,7 @@ class TestIntegration(unittest.TestCase):
             alignment_healthy=False,
         )
 
-        self.assertIn("misaligned" in result["label"].lower() or "caution" in result["tone"])
+        self.assertTrue("misaligned" in result["label"].lower() or "caution" in result["tone"])
 
     def test_adaptive_verdict_normal_case(self):
         """Test verdict in normal case."""
