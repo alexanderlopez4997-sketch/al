@@ -520,11 +520,52 @@ def apply_adaptive_gates(res):
     return res
 
 
+LOOKBACK_STABILITY_WINDOWS = (62, 124)
+
+
+def check_lookback_stability(res, windows=LOOKBACK_STABILITY_WINDOWS):
+    """Problem #1 (walk-forward): a single static-lookback backtest can flip
+    from losing to winning (or vice versa) purely because of how much
+    history it happened to use — QNST's original 'unstable backtest' flag.
+    Re-run the eligibility backtest on each of the given trailing windows
+    and check whether the eligibility call or the sign of Sharpe disagrees
+    across them. Neither a green nor a red light is trustworthy when the
+    windows fight each other."""
+    d, F = res.get("d"), res.get("F")
+    if d is None or F is None or len(d) < min(windows):
+        return None
+
+    weights = (res.get("opt") or {}).get("weights")
+    comp = qe.composite(F, weights, res.get("regime"))
+    ppy = res.get("ppy", 252)
+    intraday = res.get("intraday", False)
+
+    reads = []
+    for w in windows:
+        if len(d) < w:
+            continue
+        bt_w = qe.backtest(d["Close"].iloc[-w:], comp.iloc[-w:], ppy, intraday)
+        wr = bt_w["winrate"]
+        sharpe = bt_w["sharpe"]
+        ineligible = bool(sharpe < 0 or (not math.isnan(wr) and bt_w["trades"] >= 3 and wr < 0.35))
+        reads.append({"bars": w, "sharpe": sharpe, "winrate": wr, "ineligible": ineligible})
+
+    if len(reads) < 2:
+        return None
+
+    finite = [r for r in reads if math.isfinite(r["sharpe"])]
+    eligibility_flips = len({r["ineligible"] for r in reads}) > 1
+    sharpe_sign_flips = len({r["sharpe"] >= 0 for r in finite}) > 1 if len(finite) >= 2 else False
+
+    return {"unstable": eligibility_flips or sharpe_sign_flips, "windows": reads}
+
+
 def analyze_prefetched(ticker, df, interval):
     res = qe.analyze(ticker, df, interval, None)
     res["dollar_vol"] = dollar_volume(res["d"])
     res["opt"] = None
     apply_adaptive_gates(res)
+    res["lookback_stability"] = check_lookback_stability(res)
     return res
 
 
@@ -705,6 +746,7 @@ def screen_one(ticker, demo, period, interval, optimize, cache=None, realtime_ke
     res["opt"] = opt
     res["quote"] = quote
     apply_adaptive_gates(res)
+    res["lookback_stability"] = check_lookback_stability(res)
     return res
 
 
@@ -1047,6 +1089,15 @@ def build_report_segments(res, opt, account, risk):
         add(f"  ·  {label} px ({q.get('source', 'live')})",
             "warn" if sess in ("pre", "post", "closed") else "buy")
     add("\n", "dim"); add("─" * 52 + "\n", "dim")
+    ls = res.get("lookback_stability")
+    if ls and ls["unstable"]:
+        fmt_sharpe = lambda s: "n/a" if math.isnan(s) else f"{s:+.2f}"
+        wtxt = " · ".join(f"{r['bars']}bars Sharpe {fmt_sharpe(r['sharpe'])}" for r in ls["windows"])
+        add("UNSTABLE BACKTEST  ", "head")
+        add(f"— {res['ticker']}'s eligibility DISAGREES across lookback windows ({wtxt}). "
+            "Neither a green nor a red light here is reliable — the backtest is too "
+            "sensitive to how much history you use to trust either way.\n", "warn")
+        add("─" * 52 + "\n", "dim")
     if res.get("interval_fallback"):
         add("↳ recent listing — not enough daily history, so this read is on "
             f"{res['interval_fallback']} bars (shorter horizon than the usual daily swing setup)\n", "warn")

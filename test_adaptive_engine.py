@@ -23,6 +23,8 @@ from adaptive_engine import (
 )
 from quant_engine_extensions import AdaptiveComposite, adaptive_verdict
 
+np.random.seed(7)   # deterministic fixtures — no flaky failures on unlucky draws
+
 
 # ================================================================ FIXTURES ===
 
