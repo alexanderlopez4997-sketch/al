@@ -633,6 +633,7 @@ async function refresh(){$('wlnote').textContent='updating…';
   fetch('/api/watchlist?demo='+demo()+'&tickers='+wl()).then(r=>r.json()),
   fetch('/api/categories').then(r=>r.json()),
   fetch('/api/news?demo='+demo()+'&tickers='+wl()).then(r=>r.json())]);
+  if(!Array.isArray(d)){$('main').innerHTML='<div class="card" style="color:var(--sell)">Watchlist unavailable: '+((d&&d.error)||'unexpected response')+'</div>';$('wlnote').textContent='';return;}
   let h='<div style="padding:0"><h2 style="color:var(--gold);margin:0 0 12px;font-size:16px">YOUR WATCHLIST</h2>';
   h+='<div class="wgrid">';for(const r of d){const c=r.tone==='good'?'g':r.tone==='bad'?'b':'n';
    const cc=r.chg>=0?'var(--buy)':'var(--sell)';
