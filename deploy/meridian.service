@@ -1,0 +1,39 @@
+[Unit]
+Description=Meridian Quant Web Terminal
+Documentation=https://github.com/alexanderlopez4997-sketch/al
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Dedicated unprivileged user (create with: sudo useradd -r -s /usr/sbin/nologin meridian)
+User=meridian
+Group=meridian
+
+# Adjust to wherever you cloned the repo.
+WorkingDirectory=/opt/meridian
+
+# web_server.py auto-loads a .env file in WorkingDirectory (FINNHUB_KEY, etc.).
+# Keep that file at /opt/meridian/.env, owned by the meridian user, chmod 600.
+ExecStart=/opt/meridian/.venv/bin/python web_server.py
+
+Restart=on-failure
+RestartSec=5
+
+# web_server.py binds 127.0.0.1:8787 (localhost only), so the dashboard is NOT
+# reachable from outside the box by default. Reach it via an SSH tunnel or put a
+# reverse proxy in front of it (see DEPLOY.md). The app has no authentication —
+# do not expose port 8787 to the public internet directly.
+
+# --- hardening (safe to keep; loosen only if something legitimately needs it) ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# The app writes a cache under the service user's home (~/.meridian_cache) and to
+# its working dir; grant just those.
+ReadWritePaths=/opt/meridian
+StateDirectory=meridian
+
+[Install]
+WantedBy=multi-user.target
