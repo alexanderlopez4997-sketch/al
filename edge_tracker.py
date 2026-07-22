@@ -102,6 +102,7 @@ def track_record_override(factor_id: str) -> Tuple[bool, Optional[Dict]]:
         - override_active: True if override is triggered
         - track_record_data: Historical performance metrics or None
     """
+    init_db()  # ensure schema exists (no-op if already created)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
@@ -183,6 +184,48 @@ def update_override_status(factor_id: str, override_active: bool, track_record: 
         SET override_active = ?, override_reason = ?, updated_at = ?
         WHERE factor_id = ?
     """, (1 if override_active else 0, reason, datetime.now().isoformat(), factor_id))
+
+    conn.commit()
+    conn.close()
+
+
+def record_closed_trade(factor_id: str, pnl_pct: float) -> None:
+    """Record ONE realized closed-trade outcome into the track record.
+
+    This is the genuine feed for track_record_override(): it should be called
+    when a real position is closed (see quant_engine.close_position), not from
+    an in-sample backtest. Outcomes accumulate into today's row for the factor
+    (a trade is a win when pnl_pct > 0), and avg_return is kept as the running
+    mean realized %-return across all trades logged that day.
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute(
+        "SELECT win_count, loss_count, avg_return FROM factor_track_record "
+        "WHERE factor_id = ? AND date = ?", (factor_id, today))
+    row = cursor.fetchone()
+
+    win = 1 if pnl_pct > 0 else 0
+    loss = 1 - win
+    if row:
+        w, ell, avg = row[0] or 0, row[1] or 0, row[2] or 0.0
+        n = w + ell
+        new_w, new_l = w + win, ell + loss
+        new_avg = (avg * n + pnl_pct) / (n + 1) if (n + 1) else pnl_pct
+    else:
+        new_w, new_l, new_avg = win, loss, pnl_pct
+    total = new_w + new_l
+
+    cursor.execute("""
+        INSERT OR REPLACE INTO factor_track_record
+        (factor_id, date, win_count, loss_count, total_trades, avg_return,
+         sharpe_ratio, information_ratio, max_drawdown, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (factor_id, today, new_w, new_l, total, new_avg,
+          0.0, 0.0, 0.0, datetime.now().isoformat()))
 
     conn.commit()
     conn.close()

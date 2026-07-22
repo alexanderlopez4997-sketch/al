@@ -2002,6 +2002,14 @@ def close_position(ticker, exit_price, filepath="positions.json"):
             data["closed"].append(pos)
             data["positions"].remove(pos)
             save_positions(data, filepath)
+            # Feed the genuine realized outcome into the track record. This is the
+            # legitimate source for edge_tracker.track_record_override() — real
+            # closed trades, not a re-logged in-sample backtest.
+            try:
+                import edge_tracker as et
+                et.record_closed_trade(ticker, pnl_pct)
+            except Exception:
+                pass
             return pos
     return None
 
