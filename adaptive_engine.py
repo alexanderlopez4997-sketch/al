@@ -226,9 +226,12 @@ class SubFactorAlignmentFilter:
         self.veto_log = []
 
     def compute_alignment(self, factor_row):
-        """Compute directional consensus for a single bar.
+        """Compute directional consensus for a single bar: what fraction of
+        factors agree with the DOMINANT sign among them (majority, not
+        unanimity). n_agreeing is that majority count on every path, so it's
+        never inconsistent with consensus_pct (e.g. "75% (4/4 agree)").
 
-        Returns {consensus_pct, aligned, vetoed_reason}.
+        Returns {consensus_pct, aligned, n_factors, n_agreeing, vetoed_reason}.
         """
         if factor_row.isna().any():
             return {
@@ -241,35 +244,18 @@ class SubFactorAlignmentFilter:
 
         signs = np.sign(factor_row.values)
         n_factors = len(signs)
-
-        # Count agreement (all same sign, or most pointing to dominant sign)
-        unique_signs = set(signs)
-
-        # If mixed signs (some positive, some negative)
-        if 1 in unique_signs and -1 in unique_signs:
-            pos_count = (signs == 1).sum()
-            neg_count = (signs == -1).sum()
-            n_agreeing = max(pos_count, neg_count)
-            consensus_pct = n_agreeing / n_factors
-
-            if consensus_pct < self.min_consensus:
-                return {
-                    "consensus_pct": float(consensus_pct),
-                    "aligned": False,
-                    "n_factors": n_factors,
-                    "n_agreeing": int(n_agreeing),
-                    "vetoed_reason": f"conflicting_signals ({n_agreeing}/{n_factors} agree)",
-                }
-        else:
-            # All same sign (all positive, negative, or some zeros)
-            consensus_pct = 1.0
+        pos_count = int((signs == 1).sum())
+        neg_count = int((signs == -1).sum())
+        n_agreeing = max(pos_count, neg_count)
+        consensus_pct = (n_agreeing / n_factors) if n_factors else 0.0
+        aligned = consensus_pct >= self.min_consensus
 
         return {
             "consensus_pct": float(consensus_pct),
-            "aligned": consensus_pct >= self.min_consensus,
+            "aligned": bool(aligned),
             "n_factors": n_factors,
-            "n_agreeing": int((signs != 0).sum()),
-            "vetoed_reason": None,
+            "n_agreeing": n_agreeing,
+            "vetoed_reason": None if aligned else f"conflicting_signals ({n_agreeing}/{n_factors} agree)",
         }
 
     def apply_filter(self, factors_df, min_consensus=None):

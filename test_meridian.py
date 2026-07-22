@@ -556,6 +556,64 @@ _shift_ls = qg.check_lookback_stability(_shift_res)
 check("a sharp regime shift mid-history reads as unstable", _shift_ls["unstable"] is True)
 check("unstable read reports both window sizes", {r["bars"] for r in _shift_ls["windows"]} == {62, 124})
 
+# volatility z-score normalization (Problem #2) — replaces blunt threshold
+# widening with a relative-strength read for high-vol names, but only when
+# the two methods actually disagree on the buy/no-buy call.
+_rng2 = np.random.RandomState(1)
+_n2 = 80
+_dir = _rng2.randn(_n2) * 0.15; _dir[-1] = 0.35
+_mom = _rng2.randn(_n2) * 0.15; _mom[-1] = 0.25
+_vol_f = _rng2.randn(_n2) * 0.15; _vol_f[-1] = 0.15
+_mrv = _rng2.randn(_n2) * 0.15; _mrv[-1] = 0.10
+_F_spike = pd.DataFrame({"Direction": _dir, "Momentum": _mom, "Volume": _vol_f, "MeanRev": _mrv})
+_close_hv = pd.Series(100 * np.exp(np.cumsum(_rng2.randn(_n2) * 0.04)))
+
+_res_suppressed = {
+    "score": 25.0, "atr_pct": 5.0, "ann_vol": 60.0, "buy_th": 30.0, "strong_th": 75.0,
+    "calib": None, "F": _F_spike, "d": {"Close": _close_hv}, "opt": None, "regime": None,
+    "verdict": qe.verdict(25.0, 5.0, 30.0, 75.0),
+}
+qg.apply_vol_normalization(_res_suppressed)
+check("blunt widening suppressed a real signal to HOLD before normalization",
+      25.0 < 30.0)
+check("z-normalized relative-strength read restores the BUY call",
+      _res_suppressed["vol_normalization"]["overridden"] is True
+      and _res_suppressed["score"] >= _res_suppressed["buy_th"])
+check("overridden score stays on the system's normal -100..+100 scale",
+      abs(_res_suppressed["score"]) <= 100.0)
+check("overridden thresholds reset to the fixed defaults (18/45)",
+      _res_suppressed["buy_th"] == 18.0 and _res_suppressed["strong_th"] == 45.0)
+
+_rng3 = np.random.RandomState(2)
+_F_quiet = pd.DataFrame({"Direction": _rng3.randn(_n2) * 0.15, "Momentum": _rng3.randn(_n2) * 0.15,
+                          "Volume": _rng3.randn(_n2) * 0.15, "MeanRev": _rng3.randn(_n2) * 0.15})
+_res_agree = {
+    "score": 5.0, "atr_pct": 5.0, "ann_vol": 60.0, "buy_th": 30.0, "strong_th": 75.0,
+    "calib": None, "F": _F_quiet, "d": {"Close": _close_hv}, "opt": None, "regime": None,
+    "verdict": qe.verdict(5.0, 5.0, 30.0, 75.0),
+}
+qg.apply_vol_normalization(_res_agree)
+check("both methods agreeing on no-BUY leaves the raw score untouched",
+      _res_agree["vol_normalization"]["overridden"] is False and _res_agree["score"] == 5.0)
+
+_res_low_vol = {
+    "score": 25.0, "atr_pct": 1.0, "ann_vol": 15.0, "buy_th": 18.0, "strong_th": 45.0,
+    "calib": None, "F": _F_spike, "d": {"Close": _close_hv}, "opt": None, "regime": None,
+    "verdict": qe.verdict(25.0, 1.0, 18.0, 45.0),
+}
+qg.apply_vol_normalization(_res_low_vol)
+check("low-vol names are skipped entirely (blunt widening never applied there)",
+      _res_low_vol["vol_normalization"]["applied"] is False and _res_low_vol["score"] == 25.0)
+
+_res_calibrated = {
+    "score": 25.0, "atr_pct": 5.0, "ann_vol": 60.0, "buy_th": 22.0, "strong_th": 55.0,
+    "calib": {"buy": 22.0, "strong": 55.0}, "F": _F_spike, "d": {"Close": _close_hv},
+    "opt": None, "regime": None, "verdict": qe.verdict(25.0, 5.0, 22.0, 55.0),
+}
+qg.apply_vol_normalization(_res_calibrated)
+check("per-name calibrated thresholds are left alone (nothing to correct)",
+      _res_calibrated["vol_normalization"]["applied"] is False and _res_calibrated["score"] == 25.0)
+
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")
 print(f"RESULTS: {_PASS} passed, {_FAIL} failed")

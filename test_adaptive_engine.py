@@ -221,6 +221,11 @@ class TestSubFactorAlignmentFilter(unittest.TestCase):
         alignment = self.filter.compute_alignment(row)
         self.assertTrue(alignment["aligned"])
         self.assertAlmostEqual(alignment["consensus_pct"], 0.75)
+        # n_agreeing must be the majority count (3), not the count of every
+        # nonzero factor (4) — those would make consensus_pct and n_agreeing
+        # report inconsistent numbers, e.g. "75% (4/4 agree)".
+        self.assertEqual(alignment["n_agreeing"], 3)
+        self.assertEqual(alignment["n_agreeing"] / alignment["n_factors"], alignment["consensus_pct"])
 
     def test_apply_filter_to_dataframe(self):
         """Test filtering across entire dataframe."""
