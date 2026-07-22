@@ -32,6 +32,7 @@ import websocket_client_v2 as wsc
 from meridian_cache import MeridianCache
 import tui_dashboard as td
 import signal_scoring as ss
+import quant_gui as qg
 
 _PASS = _FAIL = 0
 _FAILURES = []
@@ -480,6 +481,138 @@ try:
           and et.track_record_override("WWW")[1]["total_wins"] == 1)
 finally:
     et.DB_PATH = _orig_db
+
+# ------------------------------------------------------ quant_gui · adaptive gates
+section("quant_gui · adaptive gates (alignment / whale) + lookback stability")
+
+_F_misaligned = pd.DataFrame({"Direction": [-0.36], "Momentum": [-0.03],
+                               "Volume": [0.22], "MeanRev": [0.46]})
+_res_would_buy = {
+    "score": 22.0, "atr_pct": 2.1, "F": _F_misaligned,
+    "whale_activity": {"rvol": 0.8, "cmf": -0.07, "dollar_vol": 750_000_000,
+                        "direction": "distribution", "whale": False, "signal": -0.05},
+    "verdict": qe.verdict(22.0, 2.1), "buy_th": 18.0, "strong_th": 45.0, "regime": None,
+}
+qg.apply_adaptive_gates(_res_would_buy)
+check("misaligned would-be BUY (2/4 consensus) gets suppressed to 0",
+      _res_would_buy["score"] == 0.0)
+check("gated verdict tone flips to bad", _res_would_buy["verdict"]["tone"] == "bad")
+check("gated verdict label mentions the gate", "GATE" in _res_would_buy["verdict"]["label"])
+check("gate reason cites the misalignment", _res_would_buy["adaptive_gate"]["vetoed"] is True)
+
+_F_aligned = pd.DataFrame({"Direction": [0.4], "Momentum": [0.3], "Volume": [0.5], "MeanRev": [0.2]})
+_res_whale = {
+    "score": 30.0, "atr_pct": 2.1, "F": _F_aligned,
+    "whale_activity": {"rvol": 2.2, "cmf": -0.09, "dollar_vol": 5_000_000,
+                        "direction": "distribution", "whale": True, "signal": -0.6},
+    "verdict": qe.verdict(30.0, 2.1), "buy_th": 18.0, "strong_th": 45.0, "regime": None,
+}
+qg.apply_adaptive_gates(_res_whale)
+check("aligned factors + whale distribution + abnormal volume still vetoes",
+      _res_whale["score"] == 0.0 and "WHALE" in _res_whale["verdict"]["label"])
+
+_res_clean = {
+    "score": 30.0, "atr_pct": 2.1, "F": _F_aligned,
+    "whale_activity": {"rvol": 1.1, "cmf": 0.03, "dollar_vol": 900_000,
+                        "direction": "neutral", "whale": False, "signal": 0.1},
+    "verdict": qe.verdict(30.0, 2.1), "buy_th": 18.0, "strong_th": 45.0, "regime": None,
+}
+qg.apply_adaptive_gates(_res_clean)
+check("aligned factors + clean whale metrics pass through unchanged",
+      _res_clean["score"] == 30.0 and _res_clean["adaptive_gate"]["vetoed"] is False)
+
+_res_hold = {
+    "score": -2.0, "atr_pct": 2.1, "F": _F_misaligned,
+    "whale_activity": {"rvol": 0.8, "cmf": -0.07, "dollar_vol": 750_000_000,
+                        "direction": "distribution", "whale": False, "signal": -0.05},
+    "verdict": qe.verdict(-2.0, 2.1), "buy_th": 18.0, "strong_th": 45.0, "regime": None,
+}
+qg.apply_adaptive_gates(_res_hold)
+check("HOLD/AVOID scores are left untouched (nothing to prevent)",
+      _res_hold["score"] == -2.0 and _res_hold["adaptive_gate"]["vetoed"] is False)
+
+# lookback-window stability (Problem #1 / WFO) — flags eligibility that flips
+# depending purely on how much history the backtest happens to use.
+_stable_res = qe.analyze("STAB", qe.demo_data("STAB", bars=124), "1d", None)
+_stable_res["opt"] = None
+_stable_ls = qg.check_lookback_stability(_stable_res)
+check("lookback stability check runs on ordinary demo data", _stable_ls is not None)
+check("demo data (no regime shift) reads as stable", _stable_ls["unstable"] is False)
+
+_rng = np.random.RandomState(3)
+_n = 124
+_idx = pd.bdate_range("2025-01-01", periods=_n)
+_ret1 = _rng.randn(62) * 0.01 + 0.01
+_ret2 = _rng.randn(62) * 0.03 - 0.02
+_close = 100 * np.exp(np.cumsum(np.concatenate([_ret1, _ret2])))
+_high = _close * (1 + np.abs(_rng.randn(_n) * 0.01))
+_low = _close * (1 - np.abs(_rng.randn(_n) * 0.01))
+_vol = _rng.exponential(1e6, _n)
+_df_shift = pd.DataFrame({"Open": _close, "High": _high, "Low": _low,
+                           "Close": _close, "Volume": _vol}, index=_idx)
+_shift_res = qe.analyze("SHIFT", _df_shift, "1d", None)
+_shift_res["opt"] = None
+_shift_ls = qg.check_lookback_stability(_shift_res)
+check("a sharp regime shift mid-history reads as unstable", _shift_ls["unstable"] is True)
+check("unstable read reports both window sizes", {r["bars"] for r in _shift_ls["windows"]} == {62, 124})
+
+# volatility z-score normalization (Problem #2) — replaces blunt threshold
+# widening with a relative-strength read for high-vol names, but only when
+# the two methods actually disagree on the buy/no-buy call.
+_rng2 = np.random.RandomState(1)
+_n2 = 80
+_dir = _rng2.randn(_n2) * 0.15; _dir[-1] = 0.35
+_mom = _rng2.randn(_n2) * 0.15; _mom[-1] = 0.25
+_vol_f = _rng2.randn(_n2) * 0.15; _vol_f[-1] = 0.15
+_mrv = _rng2.randn(_n2) * 0.15; _mrv[-1] = 0.10
+_F_spike = pd.DataFrame({"Direction": _dir, "Momentum": _mom, "Volume": _vol_f, "MeanRev": _mrv})
+_close_hv = pd.Series(100 * np.exp(np.cumsum(_rng2.randn(_n2) * 0.04)))
+
+_res_suppressed = {
+    "score": 25.0, "atr_pct": 5.0, "ann_vol": 60.0, "buy_th": 30.0, "strong_th": 75.0,
+    "calib": None, "F": _F_spike, "d": {"Close": _close_hv}, "opt": None, "regime": None,
+    "verdict": qe.verdict(25.0, 5.0, 30.0, 75.0),
+}
+qg.apply_vol_normalization(_res_suppressed)
+check("blunt widening suppressed a real signal to HOLD before normalization",
+      25.0 < 30.0)
+check("z-normalized relative-strength read restores the BUY call",
+      _res_suppressed["vol_normalization"]["overridden"] is True
+      and _res_suppressed["score"] >= _res_suppressed["buy_th"])
+check("overridden score stays on the system's normal -100..+100 scale",
+      abs(_res_suppressed["score"]) <= 100.0)
+check("overridden thresholds reset to the fixed defaults (18/45)",
+      _res_suppressed["buy_th"] == 18.0 and _res_suppressed["strong_th"] == 45.0)
+
+_rng3 = np.random.RandomState(2)
+_F_quiet = pd.DataFrame({"Direction": _rng3.randn(_n2) * 0.15, "Momentum": _rng3.randn(_n2) * 0.15,
+                          "Volume": _rng3.randn(_n2) * 0.15, "MeanRev": _rng3.randn(_n2) * 0.15})
+_res_agree = {
+    "score": 5.0, "atr_pct": 5.0, "ann_vol": 60.0, "buy_th": 30.0, "strong_th": 75.0,
+    "calib": None, "F": _F_quiet, "d": {"Close": _close_hv}, "opt": None, "regime": None,
+    "verdict": qe.verdict(5.0, 5.0, 30.0, 75.0),
+}
+qg.apply_vol_normalization(_res_agree)
+check("both methods agreeing on no-BUY leaves the raw score untouched",
+      _res_agree["vol_normalization"]["overridden"] is False and _res_agree["score"] == 5.0)
+
+_res_low_vol = {
+    "score": 25.0, "atr_pct": 1.0, "ann_vol": 15.0, "buy_th": 18.0, "strong_th": 45.0,
+    "calib": None, "F": _F_spike, "d": {"Close": _close_hv}, "opt": None, "regime": None,
+    "verdict": qe.verdict(25.0, 1.0, 18.0, 45.0),
+}
+qg.apply_vol_normalization(_res_low_vol)
+check("low-vol names are skipped entirely (blunt widening never applied there)",
+      _res_low_vol["vol_normalization"]["applied"] is False and _res_low_vol["score"] == 25.0)
+
+_res_calibrated = {
+    "score": 25.0, "atr_pct": 5.0, "ann_vol": 60.0, "buy_th": 22.0, "strong_th": 55.0,
+    "calib": {"buy": 22.0, "strong": 55.0}, "F": _F_spike, "d": {"Close": _close_hv},
+    "opt": None, "regime": None, "verdict": qe.verdict(25.0, 5.0, 22.0, 55.0),
+}
+qg.apply_vol_normalization(_res_calibrated)
+check("per-name calibrated thresholds are left alone (nothing to correct)",
+      _res_calibrated["vol_normalization"]["applied"] is False and _res_calibrated["score"] == 25.0)
 
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")

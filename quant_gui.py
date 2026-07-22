@@ -47,6 +47,12 @@ import leaderboard as lb
 from meridian_cache import MeridianCache
 
 try:
+    from adaptive_engine import SubFactorAlignmentFilter, WhaleFootprintGate, VolatilityAdaptiveNormalizer
+    HAS_ADAPTIVE = True
+except ImportError:
+    HAS_ADAPTIVE = False
+
+try:
     import tkinter as tk
     from tkinter import ttk, font as tkfont
     from tkinter.scrolledtext import ScrolledText
@@ -469,10 +475,167 @@ def fetch_movers(limit=100):
     return None
 
 
+def apply_vol_normalization(res, vol_threshold=None):
+    """Problem #2: instead of bluntly widening the BUY/STRONG thresholds for
+    high-volatility names (qe.vol_thresholds() — up to 1.8x at ~65%+ ann vol),
+    which crushes conviction even when the underlying signal is genuine,
+    z-score-normalize each factor to its OWN rolling distribution and score
+    the name on a relative-strength scale against the FIXED default
+    thresholds instead. Only steps in when: the name is actually in a
+    high-vol regime, no per-name calibration is active (calibration already
+    replaces the blunt widening with data-derived thresholds — nothing to
+    fix there), and the two methods actually disagree on the buy/no-buy
+    call. Agreement means there's nothing controversial to correct."""
+    vth = vol_threshold if vol_threshold is not None else qe.HIGH_VOL
+    info = {"checked": HAS_ADAPTIVE, "applied": False, "overridden": False}
+    if not HAS_ADAPTIVE or res.get("calib") or res.get("ann_vol", 0.0) < vth:
+        res["vol_normalization"] = info
+        return res
+
+    F, d = res.get("F"), res.get("d")
+    if F is None or d is None or len(F) < 60:
+        res["vol_normalization"] = info
+        return res
+
+    normalizer = VolatilityAdaptiveNormalizer(window=60, vol_percentile_threshold=vth)
+    norm_factors, vol_info = normalizer.normalize_factor_scores(F, d["Close"], vol_threshold=vth)
+    if not vol_info.get("normalization_applied"):
+        res["vol_normalization"] = info
+        return res
+
+    weights = (res.get("opt") or {}).get("weights") or qe.BASE_WEIGHTS
+    w = dict(weights)
+    regime = res.get("regime")
+    if regime and regime.get("confidence", 0) > 0.6:
+        regime_w = qe.REGIME_WEIGHTS.get(regime["regime"])
+        if regime_w:
+            alpha = regime["confidence"]
+            w = {k: (1 - alpha) * w[k] + alpha * regime_w[k] for k in qe.FACTORS}
+
+    # normalize_factor_scores() clips z-scores to ±3σ; rescale to the same
+    # ±1 range raw factors occupy so the composite stays on the system's
+    # normal -100..+100 scale instead of blowing out to ±300.
+    Z_CLIP = 3.0
+    z_last = norm_factors[qe.FACTORS].iloc[-1]
+    z_score = float(100 * sum(w[k] * (float(z_last[k]) / Z_CLIP) for k in qe.FACTORS))
+
+    raw_score = res["score"]
+    raw_buy_th = res.get("buy_th", qe.ENTER)
+    default_buy, default_strong = qe.ENTER, 45.0
+
+    info.update({
+        "applied": True, "ann_vol": res.get("ann_vol"),
+        "raw_score": raw_score, "raw_thresholds": (raw_buy_th, res.get("strong_th", 45.0)),
+        "z_score": z_score, "fixed_thresholds": (default_buy, default_strong),
+    })
+
+    raw_call = raw_score >= raw_buy_th
+    z_call = z_score >= default_buy
+    if raw_call != z_call:
+        info["overridden"] = True
+        res["score"] = z_score
+        res["buy_th"], res["strong_th"] = default_buy, default_strong
+        res["verdict"] = qe.verdict(z_score, res["atr_pct"], default_buy, default_strong,
+                                     regime, "VOL_NORMALIZED",
+                                     res["verdict"].get("information_ratio"),
+                                     res["verdict"].get("win_rate"))
+
+    res["vol_normalization"] = info
+    return res
+
+
+def apply_adaptive_gates(res):
+    """Elevate sub-factor alignment and whale distribution pressure from
+    descriptive metadata to an active pre-score gate. If a would-be BUY
+    (score > 0) has misaligned sub-factors (< 66% directional consensus)
+    or abnormal volume paired with net negative money flow, the score is
+    suppressed to 0 and the verdict overridden — mirroring the existing
+    NO_EDGE suppression pattern already used for edge_status."""
+    gate = {"checked": HAS_ADAPTIVE, "vetoed": False, "reasons": []}
+    if not HAS_ADAPTIVE:
+        res["adaptive_gate"] = gate
+        return res
+
+    F = res.get("F")
+    if F is not None and len(F):
+        gate["alignment"] = SubFactorAlignmentFilter(min_consensus=0.66).compute_alignment(F.iloc[-1])
+
+    whale = res.get("whale_activity")
+    if whale:
+        _, whale_veto, whale_reason = WhaleFootprintGate().apply_whale_gate(whale, res.get("score", 0.0))
+        gate["whale"] = {"vetoed": whale_veto, "reason": whale_reason}
+
+    would_buy = res.get("score", 0.0) > 0
+    misaligned = bool(gate.get("alignment") and not gate["alignment"]["aligned"])
+    whale_veto = bool(gate.get("whale", {}).get("vetoed"))
+
+    if would_buy and (misaligned or whale_veto):
+        gate["vetoed"] = True
+        if misaligned:
+            gate["reasons"].append(f"sub-factor misalignment ({gate['alignment']['vetoed_reason']})")
+        if whale_veto:
+            gate["reasons"].append(gate["whale"]["reason"])
+
+        gate["pre_gate_score"] = res["score"]
+        res["score"] = 0.0
+        primary = "WHALE VETO" if whale_veto else "MISALIGNED FACTORS"
+        vrd = qe.verdict(0.0, res["atr_pct"], res.get("buy_th", qe.ENTER),
+                          res.get("strong_th", 45.0), res.get("regime"), "GATED")
+        vrd["label"] = f"ADAPTIVE GATE — {primary}"
+        vrd["tone"] = "bad"
+        res["verdict"] = vrd
+
+    res["adaptive_gate"] = gate
+    return res
+
+
+LOOKBACK_STABILITY_WINDOWS = (62, 124)
+
+
+def check_lookback_stability(res, windows=LOOKBACK_STABILITY_WINDOWS):
+    """Problem #1 (walk-forward): a single static-lookback backtest can flip
+    from losing to winning (or vice versa) purely because of how much
+    history it happened to use — QNST's original 'unstable backtest' flag.
+    Re-run the eligibility backtest on each of the given trailing windows
+    and check whether the eligibility call or the sign of Sharpe disagrees
+    across them. Neither a green nor a red light is trustworthy when the
+    windows fight each other."""
+    d, F = res.get("d"), res.get("F")
+    if d is None or F is None or len(d) < min(windows):
+        return None
+
+    weights = (res.get("opt") or {}).get("weights")
+    comp = qe.composite(F, weights, res.get("regime"))
+    ppy = res.get("ppy", 252)
+    intraday = res.get("intraday", False)
+
+    reads = []
+    for w in windows:
+        if len(d) < w:
+            continue
+        bt_w = qe.backtest(d["Close"].iloc[-w:], comp.iloc[-w:], ppy, intraday)
+        wr = bt_w["winrate"]
+        sharpe = bt_w["sharpe"]
+        ineligible = bool(sharpe < 0 or (not math.isnan(wr) and bt_w["trades"] >= 3 and wr < 0.35))
+        reads.append({"bars": w, "sharpe": sharpe, "winrate": wr, "ineligible": ineligible})
+
+    if len(reads) < 2:
+        return None
+
+    finite = [r for r in reads if math.isfinite(r["sharpe"])]
+    eligibility_flips = len({r["ineligible"] for r in reads}) > 1
+    sharpe_sign_flips = len({r["sharpe"] >= 0 for r in finite}) > 1 if len(finite) >= 2 else False
+
+    return {"unstable": eligibility_flips or sharpe_sign_flips, "windows": reads}
+
+
 def analyze_prefetched(ticker, df, interval):
     res = qe.analyze(ticker, df, interval, None)
     res["dollar_vol"] = dollar_volume(res["d"])
     res["opt"] = None
+    apply_vol_normalization(res)
+    apply_adaptive_gates(res)
+    res["lookback_stability"] = check_lookback_stability(res)
     return res
 
 
@@ -652,6 +815,9 @@ def screen_one(ticker, demo, period, interval, optimize, cache=None, realtime_ke
     res["dollar_vol"] = dollar_volume(res["d"])
     res["opt"] = opt
     res["quote"] = quote
+    apply_vol_normalization(res)
+    apply_adaptive_gates(res)
+    res["lookback_stability"] = check_lookback_stability(res)
     return res
 
 
@@ -994,6 +1160,15 @@ def build_report_segments(res, opt, account, risk):
         add(f"  ·  {label} px ({q.get('source', 'live')})",
             "warn" if sess in ("pre", "post", "closed") else "buy")
     add("\n", "dim"); add("─" * 52 + "\n", "dim")
+    ls = res.get("lookback_stability")
+    if ls and ls["unstable"]:
+        fmt_sharpe = lambda s: "n/a" if math.isnan(s) else f"{s:+.2f}"
+        wtxt = " · ".join(f"{r['bars']}bars Sharpe {fmt_sharpe(r['sharpe'])}" for r in ls["windows"])
+        add("UNSTABLE BACKTEST  ", "head")
+        add(f"— {res['ticker']}'s eligibility DISAGREES across lookback windows ({wtxt}). "
+            "Neither a green nor a red light here is reliable — the backtest is too "
+            "sensitive to how much history you use to trust either way.\n", "warn")
+        add("─" * 52 + "\n", "dim")
     if res.get("interval_fallback"):
         add("↳ recent listing — not enough daily history, so this read is on "
             f"{res['interval_fallback']} bars (shorter horizon than the usual daily swing setup)\n", "warn")
@@ -1075,6 +1250,25 @@ def build_report_segments(res, opt, account, risk):
         if w["whale"]:
             add(f"  ↳ abnormal volume with {w['direction']} pressure — big money is active "
                 f"(who/why is unknowable)\n", "dim")
+        add("\n", "txt")
+    ag = res.get("adaptive_gate")
+    if ag and ag.get("checked") and (ag.get("vetoed") or ag.get("alignment")):
+        add("ADAPTIVE GATES ", "head")
+        add("(pre-score consensus + whale veto — active, not descriptive)\n", "dim")
+        al = ag.get("alignment")
+        if al:
+            atag = "buy" if al["aligned"] else "sell"
+            add(f"  sub-factor consensus {al['consensus_pct']*100:.0f}% "
+                f"({al['n_agreeing']}/{al['n_factors']} agree)", atag)
+            add("  ALIGNED\n" if al["aligned"] else "  MISALIGNED\n", atag)
+        wg = ag.get("whale")
+        if wg:
+            wtag = "sell" if wg["vetoed"] else "dim"
+            add(f"  whale gate: {'VETO' if wg['vetoed'] else 'clear'}", wtag)
+            add(f"  {wg['reason']}\n" if wg["reason"] else "\n", "dim")
+        if ag["vetoed"]:
+            add(f"  🚫 score suppressed {ag['pre_gate_score']:+.0f} → 0 — "
+                + "; ".join(ag["reasons"]) + "\n", "sell")
         add("\n", "txt")
     fl = res.get("orderflow")
     if fl and fl.get("n_blocks"):
@@ -1201,6 +1395,25 @@ def build_report_segments(res, opt, account, risk):
         else:
             add(f"default BUY ≥ {bth:+.0f} · STRONG ≥ {sth:+.0f} "
                 "(not enough history for a per-name calibration)\n", "dim")
+    vn = res.get("vol_normalization")
+    if vn and vn.get("applied"):
+        rb, _rs = vn["raw_thresholds"]
+        fb, _fs = vn["fixed_thresholds"]
+        raw_buy = vn["raw_score"] >= rb
+        z_buy = vn["z_score"] >= fb
+        add("VOLATILITY-ADAPTIVE READ ", "head")
+        add("(z-score factors vs. their own rolling distribution — relative-strength scale)\n", "dim")
+        add(f"  blunt-widened:      score {vn['raw_score']:+.0f} vs BUY ≥ {rb:+.0f}   ", "txt")
+        add("BUY" if raw_buy else "no BUY", "buy" if raw_buy else "dim")
+        add("\n", "txt")
+        add(f"  relative-strength:  z-score {vn['z_score']:+.0f} vs BUY ≥ {fb:+.0f}   ", "txt")
+        add("BUY" if z_buy else "no BUY", "buy" if z_buy else "dim")
+        add("\n", "txt")
+        if vn["overridden"]:
+            add(f"  ↳ methods disagreed — verdict now driven by the relative-strength read "
+                f"(blunt {vn['raw_score']:+.0f} → z {vn['z_score']:+.0f}), not the widened threshold\n", "warn")
+        else:
+            add("  ↳ both methods agree — no override needed\n", "dim")
     fw = res.get("fwd_stats")
     if fw:
         add("SIGNAL TRACK RECORD ", "head")
@@ -1215,6 +1428,8 @@ def build_report_segments(res, opt, account, risk):
     add("─" * 52 + "\n", "dim"); add("VERDICT  ", "head"); add(f"score {res['score']:+.0f}   ", "txt")
     add(v["label"], vtag)
     if v["risky"]: add("  [RISKY]", "sell")
+    if ag and ag.get("vetoed"): add("  [GATED]", "sell")
+    if vn and vn.get("overridden"): add("  [VOL-ADAPTED]", "warn")
     add(f"   · conviction {res['conviction']}%\n", "dim")
     return seg
 
