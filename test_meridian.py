@@ -453,6 +453,34 @@ check("build_signal_grid columnDefs include a status column",
       any(c["field"] == "status" for c in _grid["columnDefs"]))
 check("build_signal_grid rows are JSON-serializable", _json.dumps(_grid["rowData"]))
 
+# ------------------------------------------------- edge tracker · real trades
+section("edge_tracker · real closed-trade track record")
+import edge_tracker as et
+_orig_db = et.DB_PATH
+et.DB_PATH = tempfile.mktemp(suffix=".db")
+try:
+    check("override empty on fresh DB (no crash)", et.track_record_override("ZZZ") == (False, None))
+    et.record_closed_trade("ZZZ", -3.0)          # 1 loss
+    for _ in range(3):
+        et.record_closed_trade("ZZZ", 4.0)       # 3 wins
+    _ov, _tr = et.track_record_override("ZZZ")
+    check("real trades accumulate wins/losses", _tr["total_wins"] == 3 and _tr["total_losses"] == 1)
+    check("win_rate reflects real outcomes", abs(_tr["win_rate"] - 0.75) < 1e-9)
+    check("override off below MIN_TRADES", _ov is False)
+    for _ in range(et.TRACK_RECORD_MIN_TRADES):
+        et.record_closed_trade("ZZZ", 1.0)
+    _ov2, _tr2 = et.track_record_override("ZZZ")
+    check("override on once real trade count clears threshold",
+          _ov2 is True and _tr2["total_trades"] >= et.TRACK_RECORD_MIN_TRADES)
+    # close_position() feeds the real track record
+    _pf = tempfile.mktemp(suffix=".json")
+    qe.add_position("WWW", 100.0, 70, filepath=_pf)
+    _closed = qe.close_position("WWW", 120.0, filepath=_pf)
+    check("close_position records realized win", abs(_closed["pnl_pct"] - 20.0) < 1e-6
+          and et.track_record_override("WWW")[1]["total_wins"] == 1)
+finally:
+    et.DB_PATH = _orig_db
+
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")
 print(f"RESULTS: {_PASS} passed, {_FAIL} failed")
