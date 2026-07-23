@@ -17,6 +17,7 @@ Latency: < 5ms per correlation update (vectorized Pandas)
 Test Coverage: Comprehensive edge cases, NaN handling, extreme volatility
 """
 
+import json
 import logging
 import math
 from dataclasses import dataclass, field
