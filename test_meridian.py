@@ -185,6 +185,34 @@ qe.apply_alt_tilt(res, tilt, None)
 check("apply_alt_tilt leaves backtest unchanged", res["bt"]["strategy"] == bt_before)
 check("apply_alt_tilt stores base_score", "base_score" in res)
 
+# apply_alt_tilt must not silently undo an adaptive-gate veto or drop
+# volatility widening — found by auditing for bugs of the same shape as the
+# regime-threshold one: a downstream recompute that discards an upstream
+# safety adjustment. Both were live (quant_gui._work_single and
+# web_server._full_analyze both call apply_alt_tilt right after the gates).
+_F_gate = pd.DataFrame({"Direction": [0.4], "Momentum": [0.3], "Volume": [0.5], "MeanRev": [0.2]})
+_res_gated = {
+    "score": 30.0, "atr_pct": 2.1, "F": _F_gate, "ann_vol": 20.0, "calib": None, "regime": None,
+    "whale_activity": {"rvol": 2.2, "cmf": -0.09, "dollar_vol": 5_000_000,
+                        "direction": "distribution", "whale": True, "signal": -0.6},
+    "verdict": qe.verdict(30.0, 2.1), "buy_th": 18.0, "strong_th": 45.0,
+}
+qg.apply_adaptive_gates(_res_gated)
+qe.apply_alt_tilt(_res_gated, {"adjustment": 15.0}, {"adjustment": 10.0})   # max possible combined tilt
+check("apply_alt_tilt cannot resurrect a whale-vetoed score",
+      _res_gated["score"] == 0.0 and "GATE" in _res_gated["verdict"]["label"])
+
+_buy_hv, _strong_hv = qe.vol_thresholds(126.0)
+_res_hv = {
+    "score": 41.0, "atr_pct": 10.7, "ann_vol": 126.0, "calib": None, "regime": None,
+    "buy_th": _buy_hv, "strong_th": _strong_hv,
+    "verdict": qe.verdict(41.0, 10.7, _buy_hv, _strong_hv),
+    "F": pd.DataFrame({"Direction": [0.4], "Momentum": [0.3], "Volume": [0.1], "MeanRev": [0.1]}),
+}
+qe.apply_alt_tilt(_res_hv, {"adjustment": 5.0}, None)
+check("apply_alt_tilt preserves volatility widening for uncalibrated high-vol names",
+      _res_hv["verdict"]["strong_threshold"] > 75.0 and _res_hv["verdict"]["label"] != "STRONG BUY signal")
+
 # market_context
 sidx = pd.date_range("2026-01-01", periods=120, freq="B")
 spy = pd.DataFrame({"Open": 1, "High": 1, "Low": 1, "Close": np.linspace(100, 110, 120), "Volume": 1}, index=sidx)

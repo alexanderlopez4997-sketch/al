@@ -1506,7 +1506,16 @@ def apply_alt_tilt(res, tilt, market=None):
     """Apply alt-data and/or market-relative adjustments to an analyze() result
     in place: shift the live score, stash the pre-adjustment score, and recompute
     verdict + conviction (respecting calibrated thresholds if present). The
-    backtest in res is untouched — it stays a pure technical measure."""
+    backtest in res is untouched — it stays a pure technical measure.
+
+    The recomputed verdict must stay consistent with the ORIGINAL one analyze()
+    produced: same regime composition, same volatility widening when
+    uncalibrated. This used to silently drop both (falling back to flat
+    18/45 with no regime blend) — on a high-vol name that meant even a small
+    tilt could flip a correctly-widened "BUY" into "STRONG BUY" the moment
+    alt-data arrived, and a live gate veto (misaligned factors / whale
+    distribution — see quant_gui.apply_adaptive_gates) could get silently
+    resurrected by nothing more than a modest positive tilt."""
     if not (tilt or market):
         return res
     adj = 0.0
@@ -1514,12 +1523,19 @@ def apply_alt_tilt(res, tilt, market=None):
         res["alt"] = tilt; adj += tilt["adjustment"]
     if market:
         res["market"] = market; adj += market["adjustment"]
+    # An adaptive gate already vetoed this signal (score explicitly suppressed
+    # for a reason a tilt can't see or evaluate) — record the tilt for the
+    # report, but don't let it move the score/verdict back off zero.
+    if res.get("adaptive_gate", {}).get("vetoed"):
+        return res
     res["base_score"] = res["score"]
     res["score"] = float(np.clip(res["score"] + adj, -100, 100))
     cal = res.get("calib")
-    buy_th = cal["buy"] if cal else ENTER
-    strong_th = cal["strong"] if cal else 45.0
-    res["verdict"] = verdict(res["score"], res["atr_pct"], buy_th, strong_th)
+    if cal:
+        buy_th, strong_th = cal["buy"], cal["strong"]
+    else:
+        buy_th, strong_th = vol_thresholds(res.get("ann_vol", 0.0))
+    res["verdict"] = verdict(res["score"], res["atr_pct"], buy_th, strong_th, res.get("regime"))
     res["conviction"] = conviction(res["F"].iloc[-1], res["score"])
     return res
 
