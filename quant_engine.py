@@ -35,6 +35,13 @@ import numpy as np
 import pandas as pd
 import stops
 
+try:
+    from portfolio_risk_integration import RiskEngine
+    HAS_RISK_ENGINE = True
+except ImportError:
+    HAS_RISK_ENGINE = False
+    RiskEngine = None
+
 # --------------------------------------------------------------- colors ---
 COLOR = sys.stdout.isatty()
 def C(t, c): return f"\033[{c}m{t}\033[0m" if COLOR else str(t)
@@ -809,7 +816,7 @@ def vol_thresholds(ann_vol):
     factor = min(1.8, 1.0 + max(0.0, (ann_vol - 25.0) / 40.0))
     return round(ENTER * factor, 1), round(45.0 * factor, 1)
 
-def verdict(score, atr_pct, buy=ENTER, strong=45.0, regime=None, edge_status="ACTIVE", ir=None, win_rate=None):
+def verdict(score, atr_pct, buy=ENTER, strong=45.0, regime=None, edge_status="ACTIVE", ir=None, win_rate=None, risk_engine=None, ticker=None, entry_price=None, proposed_shares=None):
     if regime and regime.get("confidence", 0) > 0.5:
         # Apply the regime's threshold adjustment PROPORTIONALLY to whatever
         # base was passed in, rather than replacing it outright. `buy`/`strong`
@@ -833,6 +840,25 @@ def verdict(score, atr_pct, buy=ENTER, strong=45.0, regime=None, edge_status="AC
 
     result = {"label": lab, "tone": tone, "risky": bool(atr_pct >= RISKY_ATR_PCT), "edge_status": edge_status,
               "buy_threshold": buy, "strong_threshold": strong}
+
+    # Gate BUY signals through portfolio risk manager if available
+    if HAS_RISK_ENGINE and risk_engine and ticker and entry_price and proposed_shares:
+        if "BUY" in lab:
+            gate_result = risk_engine.evaluate_signal(
+                ticker=ticker,
+                proposed_shares=proposed_shares,
+                entry_price=entry_price,
+            )
+            if not gate_result.approved:
+                lab = "GATED: " + lab
+                tone = "neutral"
+                result["risk_gate_veto"] = True
+                result["limiting_factor"] = gate_result.limiting_factor
+                result["max_shares"] = gate_result.max_shares
+                for warning in gate_result.warnings:
+                    result.setdefault("gate_warnings", []).append(warning)
+            else:
+                result["max_shares"] = gate_result.max_shares
     if ir is not None:
         result["information_ratio"] = ir
     if win_rate is not None:
