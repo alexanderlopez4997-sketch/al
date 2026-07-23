@@ -118,6 +118,29 @@ check("verdict HOLD", qe.verdict(0, 2)["tone"] == "neutral")
 check("verdict AVOID", qe.verdict(-30, 2)["tone"] == "bad")
 check("verdict custom thresholds", qe.verdict(20, 2, buy=25)["tone"] == "neutral")
 check("verdict RISKY flag", qe.verdict(50, 10)["risky"] is True)
+
+# regime threshold blending must COMPOSE with vol/calibration widening, not
+# replace it — a confident bull-regime read must not silently erase the
+# safety margin vol_thresholds() built in for a genuinely high-vol name
+# (this is exactly what happened to a real 126%-vol, going-concern ticker
+# that got mislabeled STRONG BUY off a raw score of only +41).
+_nuai_buy, _nuai_strong = qe.vol_thresholds(126.0)
+check("vol_thresholds widened as expected for 126% ann vol",
+      _nuai_buy > 30 and _nuai_strong > 75)
+_nuai_verdict = qe.verdict(41, 10.7, _nuai_buy, _nuai_strong,
+                            regime={"regime": "bull", "confidence": 0.8})
+check("bull regime no longer discards vol-widened STRONG threshold",
+      _nuai_verdict["label"] != "STRONG BUY signal")
+check("score below the composed threshold reads as plain BUY, not STRONG",
+      _nuai_verdict["label"] == "BUY signal")
+# for a name at the DEFAULT (unwidened) threshold, regime blending must
+# still behave exactly as the old flat-override did — no regression there.
+check("regime blending is a no-op vs. old override when base == default",
+      qe.verdict(17, 1.0, 18.0, 45.0, regime={"regime": "bull", "confidence": 0.8})["label"]
+      == "BUY signal")
+check("regime ignored below confidence 0.5 (unchanged)",
+      qe.verdict(17, 1.0, 18.0, 45.0, regime={"regime": "bull", "confidence": 0.3})["label"]
+      == "HOLD / no edge")
 cal = qe.calibrate_thresholds(comp.values, close.values)
 check("calibration returns buy/strong or None", cal is None or (cal["strong"] >= cal["buy"]))
 fw = qe.forward_stats(comp.values, close.values)

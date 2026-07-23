@@ -329,11 +329,12 @@ class MetricsStage:
         last = float(data.d["Close"].iloc[-1])
         atr_pct = float(data.d["atr"].iloc[-1] / last * 100)
 
+        # verdict() itself applies the regime-based adjustment (proportionally,
+        # so it composes with rather than erases any vol/calibration widening
+        # in buy_th/strong_th) — don't also apply it here, or a confident
+        # regime read gets scaled twice.
         buy_th = 18.0
         strong_th = 45.0
-        if data.regime and data.regime.get("confidence", 0) > 0.5:
-            buy_th = REGIME_THRESHOLDS.get(data.regime["regime"], {}).get("enter", buy_th)
-            strong_th = REGIME_THRESHOLDS.get(data.regime["regime"], {}).get("strong", strong_th)
 
         ir = data.ir.get("Direction") if data.ir else 0.0
         # win_rate must be the backtested hit-rate: check_edge() compares it to
@@ -810,8 +811,19 @@ def vol_thresholds(ann_vol):
 
 def verdict(score, atr_pct, buy=ENTER, strong=45.0, regime=None, edge_status="ACTIVE", ir=None, win_rate=None):
     if regime and regime.get("confidence", 0) > 0.5:
-        buy = REGIME_THRESHOLDS.get(regime["regime"], {}).get("enter", buy)
-        strong = REGIME_THRESHOLDS.get(regime["regime"], {}).get("strong", strong)
+        # Apply the regime's threshold adjustment PROPORTIONALLY to whatever
+        # base was passed in, rather than replacing it outright. `buy`/`strong`
+        # often already carry a volatility-widened or per-name-calibrated bar
+        # (e.g. vol_thresholds() on a 126%-vol name can push STRONG to +81);
+        # a flat regime override would silently erase that safety margin —
+        # a confident bull-regime read alone could drop STRONG back to +40
+        # on a name whose volatility explicitly called for +81. Scaling by
+        # the regime/default ratio preserves regime adaptivity while keeping
+        # it multiplicative with, not a replacement for, vol/calibration.
+        regime_th = REGIME_THRESHOLDS.get(regime["regime"])
+        if regime_th:
+            buy = buy * (regime_th["enter"] / ENTER)
+            strong = strong * (regime_th["strong"] / 45.0)
 
     if score >= strong: lab, tone = "STRONG BUY signal", "good"
     elif score >= buy: lab, tone = "BUY signal", "good"
@@ -819,7 +831,8 @@ def verdict(score, atr_pct, buy=ENTER, strong=45.0, regime=None, edge_status="AC
     elif score > -strong: lab, tone = "AVOID / sell signal", "bad"
     else: lab, tone = "STRONG AVOID", "bad"
 
-    result = {"label": lab, "tone": tone, "risky": bool(atr_pct >= RISKY_ATR_PCT), "edge_status": edge_status}
+    result = {"label": lab, "tone": tone, "risky": bool(atr_pct >= RISKY_ATR_PCT), "edge_status": edge_status,
+              "buy_threshold": buy, "strong_threshold": strong}
     if ir is not None:
         result["information_ratio"] = ir
     if win_rate is not None:
@@ -1621,6 +1634,11 @@ def analyze(ticker, df, interval, weights=None, d=None, F=None, calibrate=False)
                 score = 0
 
     vrd = verdict(score, atr_pct, buy_th, strong_th, regime, edge_status, ir_value, win_rate)
+    # verdict() may have scaled buy_th/strong_th further for regime (proportionally,
+    # on top of the vol/calibration widening above) — use what it actually judged
+    # against from here on, so the THRESHOLDS line and the "Score clears threshold"
+    # confirmation check report the real bar instead of the pre-regime one.
+    buy_th, strong_th = vrd["buy_threshold"], vrd["strong_threshold"]
     conf = confirmation_checklist(score, vrd, conviction(F.iloc[-1], score), bt, fwd, buy_th, strong_th)
 
     # NOTE: analyze() must stay a pure function of the input bars. It used to log
