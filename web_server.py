@@ -360,9 +360,9 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, body, ctype="application/json"):
+    def _send(self, body, ctype="application/json", status=200):
         b = body.encode() if isinstance(body, str) else body
-        self.send_response(200); self.send_header("Content-Type", ctype)
+        self.send_response(status); self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(b))); self.end_headers()
         self.wfile.write(b)
 
@@ -443,7 +443,7 @@ body{{margin:0;background:#0A0E15;color:#C9D6E2;font-family:system-ui;padding:20
                 return self._send(json.dumps({"html": html}))
         except Exception as e:
             return self._send(json.dumps({"error": str(e)}))
-        self._send("not found", "text/plain")
+        self._send("not found", "text/plain", status=404)
 
 
 # ----------------------------------------------------------- aapl dashboard ---
