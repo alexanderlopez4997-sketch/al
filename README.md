@@ -35,6 +35,23 @@ python3 quant_engine.py --close-position AAPL 320    # Exit
 python3 quant_engine.py --positions                  # Show all
 ```
 
+## Web Terminal (browser dashboard)
+
+```bash
+python3 web_server.py
+```
+
+Opens `http://127.0.0.1:8787` on this machine only. To also open it on your
+phone (same Wi-Fi network), start it with:
+
+```bash
+MERIDIAN_WEB_HOST=0.0.0.0 python3 web_server.py
+```
+
+The server prints the link to open on your phone. The dashboard has **no
+login**, so only do this on a network you trust — see `deploy/DEPLOY.md` for
+deploying it behind auth on a VPS.
+
 ## Email Alerts (Gmail)
 
 Send `--alerts` or `--morning` reports to your inbox instead of (or in addition

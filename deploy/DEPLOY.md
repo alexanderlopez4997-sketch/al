@@ -5,9 +5,11 @@ and starts on boot. The server binds to **127.0.0.1:8787** (localhost only), so 
 default nothing is exposed to the internet — you reach it over an SSH tunnel, or
 put a reverse proxy with authentication in front of it.
 
-> **Security note:** the dashboard has **no authentication**. Never expose port
-> 8787 directly to the public internet. Use the SSH-tunnel or the
-> nginx + basic-auth options below.
+> **Security note:** the dashboard is protected by built-in HTTP Basic Auth
+> (set `MERIDIAN_USER` / `MERIDIAN_PASSWORD` in `.env`, or use the random
+> per-run password printed at startup). Even so, avoid exposing port 8787
+> directly to the public internet — prefer the SSH-tunnel or the
+> nginx + basic-auth options below for an added layer of protection.
 
 ---
 

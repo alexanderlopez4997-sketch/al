@@ -10,6 +10,8 @@ external asset is the TradingView lightweight-charts lib, loaded from a CDN in
 the browser for the interactive candles).
 
     python3 web_server.py   →   http://127.0.0.1:8787
+    MERIDIAN_WEB_HOST=0.0.0.0 python3 web_server.py   →   also reachable from your phone
+                                                           on the same Wi-Fi
 
 Protected by HTTP Basic Auth. Set MERIDIAN_USER / MERIDIAN_PASSWORD in .env for
 fixed credentials, or leave unset to get a random per-run password printed to
@@ -21,6 +23,7 @@ import html as _html
 import json
 import os
 import secrets
+import socket
 import threading
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
@@ -46,11 +49,14 @@ import websocket_client_v2 as wsc
 import aapl_dashboard as ad
 
 PORT = 8787
+# Loopback-only by default. Set MERIDIAN_WEB_HOST=0.0.0.0 to also reach it from
+# your phone on the same Wi-Fi (still gated by the HTTP Basic Auth below).
+HOST = os.environ.get("MERIDIAN_WEB_HOST", "127.0.0.1")
 
-# HTTP Basic Auth — required before tunneling this server (e.g. via ngrok) onto
-# the public internet. Set MERIDIAN_USER / MERIDIAN_PASSWORD in .env for fixed
-# credentials; otherwise a random password is generated per run and printed
-# to the console at startup.
+# HTTP Basic Auth — required before exposing this server beyond localhost, e.g.
+# via MERIDIAN_WEB_HOST=0.0.0.0 or an ngrok tunnel. Set MERIDIAN_USER /
+# MERIDIAN_PASSWORD in .env for fixed credentials; otherwise a random password
+# is generated per run and printed to the console at startup.
 AUTH_USER = os.environ.get("MERIDIAN_USER", "admin")
 AUTH_PASSWORD = os.environ.get("MERIDIAN_PASSWORD")
 AUTH_PASSWORD_GENERATED = AUTH_PASSWORD is None
@@ -378,9 +384,9 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, body, ctype="application/json"):
+    def _send(self, body, ctype="application/json", status=200):
         b = body.encode() if isinstance(body, str) else body
-        self.send_response(200); self.send_header("Content-Type", ctype)
+        self.send_response(status); self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(b))); self.end_headers()
         self.wfile.write(b)
 
@@ -482,7 +488,7 @@ body{{margin:0;background:#0A0E15;color:#C9D6E2;font-family:system-ui;padding:20
                 return self._send(json.dumps({"html": html}))
         except Exception as e:
             return self._send(json.dumps({"error": str(e)}))
-        self._send("not found", "text/plain")
+        self._send("not found", "text/plain", status=404)
 
 
 # ----------------------------------------------------------- aapl dashboard ---
@@ -536,14 +542,32 @@ def _get_page():
         + _pill("ALPHA·V", f["av"]) + _pill("SEC·EDGAR", f["sec"]))
 
 
+def _lan_ip():
+    """Best-effort LAN IP of this machine, for the link you open on your phone."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))   # no packet actually sent, just picks the outbound interface
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
 def main():
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    url = f"http://127.0.0.1:{PORT}"
-    print(f"Meridian Web Terminal → {url}")
+    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    local_url = f"http://127.0.0.1:{PORT}"
+    print(f"Meridian Web Terminal → {local_url}  (this machine)")
+    if HOST == "0.0.0.0":
+        lan_ip = _lan_ip()
+        if lan_ip:
+            print(f"                         http://{lan_ip}:{PORT}  (phone / other devices, same Wi-Fi)")
+        print("Note: reachable from your whole network — still gated by the Basic Auth login below. "
+              "Set MERIDIAN_WEB_HOST=127.0.0.1 to disable network access.")
     print(f"Basic auth — user: {AUTH_USER}  password: {AUTH_PASSWORD}"
           + ("  (generated — set MERIDIAN_USER/MERIDIAN_PASSWORD in .env to pin it)"
              if AUTH_PASSWORD_GENERATED else ""))
-    threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    threading.Timer(0.8, lambda: webbrowser.open(local_url)).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
