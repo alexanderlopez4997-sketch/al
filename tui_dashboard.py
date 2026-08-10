@@ -10,10 +10,17 @@ data service; this module only renders it and never embeds analysis logic of
 its own.
 
 Three zones, always visible:
-  TOP    (KPI bar)     — market session, account health, top ticker
-  MIDDLE (primary view)— per-ticker chart + verdict, or the ranked watchlist
-                          table, switched with [T]/[P]
+  TOP    (KPI bar)     — market session, account health, top ticker, live
+                          poll status (updated every second)
+  MIDDLE (primary view)— split-pane ticker view (chart/verdict + factor
+                          scores) or the ranked watchlist table, [T]/[P]
   BOTTOM (context)     — open positions + catalyst alerts for the active name
+
+Polling is adaptive: the watchlist re-fetches every REFRESH_SEC seconds while
+healthy, backing off exponentially (capped) after consecutive fetch failures
+(rate limits, timeouts) instead of hammering the API, and resets to
+REFRESH_SEC as soon as a poll succeeds again. A failed poll keeps the last
+good snapshot on screen rather than blanking the dashboard.
 
     python3 tui_dashboard.py --demo     # offline synthetic data, no API keys
     python3 tui_dashboard.py            # live watchlist.txt tickers
@@ -24,6 +31,8 @@ import argparse
 import asyncio
 import os
 import datetime as dt
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 import quant_engine as qe
 import leaderboard as lb
@@ -31,10 +40,12 @@ import morning as mb
 
 from textual import work
 from textual.app import App, ComposeResult
-from textual.containers import Grid
+from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import Header, Footer, Static, DataTable, Sparkline, ContentSwitcher
 
-REFRESH_SEC = 30           # floor matches quant_gui.MIN_REFRESH_SEC
+REFRESH_SEC = 30           # floor matches quant_gui.MIN_REFRESH_SEC; also the
+                            # base (un-backed-off) data-poll interval
+MAX_BACKOFF_MULT = 6.0     # worst-case poll interval is REFRESH_SEC * this
 CHART_ROWS = 10            # recent bars shown in the ticker DataTable
 DEFAULT_WATCHLIST = "NVDA, AMD, AAPL, MSFT, TSLA, SOFI, PLTR, AMZN"
 WATCHLIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watchlist.txt")
@@ -145,14 +156,156 @@ def account_health(rows):
     return sum(p.get("pnl_pct", 0.0) for p in rows) / len(rows)
 
 
-class TickerView(Static):
-    """Sparkline + recent-bars table + verdict + demo event annotations for one ticker."""
+# ============================================================ real-time ===
+# Pure, Textual-free state transitions for adaptive polling. Kept outside the
+# App class so they're unit-testable without a running event loop.
+
+@dataclass(frozen=True)
+class PollState:
+    """Data-poll health. Drives the adaptive refresh cadence (poll_backoff_
+    seconds) and the KPI staleness readout (format_staleness). Immutable —
+    refresh_all() replaces it via advance_poll_state(), never mutates it."""
+    consecutive_failures: int = 0
+    last_success: Optional[dt.datetime] = None
+    ok: bool = True
+
+
+@dataclass(frozen=True)
+class RefreshOutcome:
+    """Latest good watchlist snapshot (rows for PortfolioView/KPI bar,
+    res_by_ticker for the split-pane ticker view). On a failed poll the
+    previous snapshot is carried forward instead of being blanked, so a
+    transient fetch outage doesn't wipe the dashboard."""
+    rows: List[Dict[str, Any]]
+    res_by_ticker: Dict[str, Dict[str, Any]]
+    ok: bool = True
+
+
+def poll_backoff_seconds(base: float, consecutive_failures: int,
+                          max_multiplier: float = MAX_BACKOFF_MULT) -> float:
+    """Data-poll interval after `consecutive_failures` in a row: doubles per
+    failure, capped at `max_multiplier` x base. Keeps a rate-limited or
+    offline API from being hammered every REFRESH_SEC; a single success
+    (consecutive_failures=0) drops the interval straight back to base."""
+    multiplier = min(2.0 ** max(consecutive_failures, 0), max_multiplier)
+    return base * multiplier
+
+
+def advance_poll_state(state: PollState, ok: bool,
+                        now: Optional[dt.datetime] = None) -> PollState:
+    """Next PollState after one poll attempt. Success resets the failure
+    streak and stamps last_success; failure increments the streak and keeps
+    the previous last_success, so the staleness age keeps counting from the
+    last real update rather than resetting on every failed attempt."""
+    now = now or dt.datetime.now()
+    if ok:
+        return PollState(consecutive_failures=0, last_success=now, ok=True)
+    return PollState(consecutive_failures=state.consecutive_failures + 1,
+                      last_success=state.last_success, ok=False)
+
+
+def format_staleness(last_success: Optional[dt.datetime], now: dt.datetime, ok: bool) -> str:
+    """KPI-bar status text: connecting / live / stale, with the age of the
+    last successful poll. Pure formatting — `now` is passed in so it's
+    testable without mocking the clock."""
+    if last_success is None:
+        return "● connecting…"
+    age = max(0, int((now - last_success).total_seconds()))
+    tag = "●LIVE" if ok else "⚠STALE"
+    return f"{tag} updated {age}s ago"
+
+
+def merge_refresh(previous: RefreshOutcome, watchlist: List[str],
+                   raw: Dict[str, Any]) -> RefreshOutcome:
+    """Score a fresh bulk_fetch() payload against the previous snapshot.
+
+    bulk_fetch()/leaderboard.fetch_batch() already swallow per-request
+    network errors and return {} for names it couldn't reach, so an entirely
+    empty `raw` after a prior successful poll means the fetch itself failed
+    (timeout / rate limit) — the previous snapshot is kept and ok=False is
+    reported instead of blanking the dashboard. An empty `raw` on the very
+    first poll is not a failure: there is nothing yet to preserve."""
+    if not raw and previous.rows:
+        return RefreshOutcome(previous.rows, previous.res_by_ticker, ok=False)
+    rows, res_by_ticker = score_watchlist(watchlist, raw)
+    return RefreshOutcome(rows, res_by_ticker, ok=True)
+
+
+def factor_bar_glyph(value: float, width: int = 12) -> str:
+    """Render a factor value clipped to [-1, 1] as a centered unicode bar
+    split at '│', e.g. '      │███   ' for +0.5 —
+    negative values fill left of center, positive fill right."""
+    v = max(-1.0, min(1.0, value))
+    half = max(1, width // 2)
+    filled = round(abs(v) * half)
+    if v >= 0:
+        left = " " * half
+        right = "█" * filled + " " * (half - filled)
+    else:
+        left = " " * (half - filled) + "█" * filled
+        right = " " * half
+    return f"{left}│{right}"
+
+
+def factor_score_rows(res: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """analyze()-result -> latest per-factor {name, value, ir} rows for the
+    split-pane factor panel, most-impactful (|value|) first. Empty list if
+    the result carries no factor matrix (e.g. missing/short market data)."""
+    F = res.get("F")
+    if F is None or len(F) == 0:
+        return []
+    ir = res.get("information_ratio") or {}
+    latest = F.iloc[-1]
+    rows = [{"name": name, "value": float(latest[name]), "ir": float(ir.get(name, 0.0))}
+            for name in latest.index]
+    rows.sort(key=lambda r: -abs(r["value"]))
+    return rows
+
+
+class FactorScoresPane(Static):
+    """Split-pane companion to TickerView: regime + per-factor score bars
+    with information ratio (predictive power) and redundancy notes, for
+    whichever ticker TickerView is currently showing."""
 
     def compose(self) -> ComposeResult:
-        yield Sparkline([], id="ticker-spark")
-        yield DataTable(id="ticker-table")
-        yield Static("", id="ticker-verdict")
-        yield Static("", id="ticker-events")
+        yield Static("", id="factor-regime")
+        yield DataTable(id="factor-table")
+        yield Static("", id="factor-redundancy")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#factor-table", DataTable)
+        table.add_columns("Factor", "Score", "IR")
+
+    def render_factors(self, ticker: str, res: Dict[str, Any]) -> None:
+        regime = res.get("regime") or {}
+        self.query_one("#factor-regime", Static).update(
+            f"{ticker}  Regime: {regime.get('regime', 'unknown').upper()} "
+            f"({regime.get('confidence', 0.0) * 100:.0f}% conf)")
+        table = self.query_one("#factor-table", DataTable)
+        table.clear()
+        for row in factor_score_rows(res):
+            table.add_row(row["name"], factor_bar_glyph(row["value"]), f"{row['ir']:.2f}")
+        corr = res.get("factor_correlation")
+        pairs = corr.get("redundant_pairs") if corr else None
+        if pairs:
+            txt = ", ".join(f"{a}~{b} ({c:+.2f})" for a, b, c in pairs[:3])
+            self.query_one("#factor-redundancy", Static).update(f"Redundant: {txt}")
+        else:
+            self.query_one("#factor-redundancy", Static).update("Redundant: none")
+
+
+class TickerView(Static):
+    """Split-pane ticker view: left is the sparkline/recent-bars table/verdict/
+    demo events, right is the FactorScoresPane for the same ticker."""
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="ticker-split"):
+            with Vertical(id="ticker-left"):
+                yield Sparkline([], id="ticker-spark")
+                yield DataTable(id="ticker-table")
+                yield Static("", id="ticker-verdict")
+                yield Static("", id="ticker-events")
+            yield FactorScoresPane(id="factor-pane")
 
     def on_mount(self) -> None:
         table = self.query_one("#ticker-table", DataTable)
@@ -172,6 +325,7 @@ class TickerView(Static):
         events = demo_event_annotations(ticker)
         self.query_one("#ticker-events", Static).update(
             "   ".join(f"{label} ~{d.strftime('%b %d')}" for label, d in events))
+        self.query_one(FactorScoresPane).render_factors(ticker, res)
 
 
 class PortfolioView(Static):
@@ -233,8 +387,18 @@ class MeridianDashboard(App):
     }
     #kpi-bar {
         layout: grid;
-        grid-size: 3 1;
+        grid-size: 4 1;
         height: 3;
+    }
+    #ticker-split {
+        height: 1fr;
+    }
+    #ticker-left {
+        width: 65%;
+    }
+    #factor-pane {
+        width: 35%;
+        border-left: solid $accent;
     }
     #exec-zone {
         layout: grid;
@@ -256,7 +420,9 @@ class MeridianDashboard(App):
         self.demo = demo
         self.watchlist = load_saved_watchlist()
         self.active_ticker = self.watchlist[0] if self.watchlist else None
-        self._res_by_ticker = {}
+        self._snapshot = RefreshOutcome(rows=[], res_by_ticker={}, ok=True)
+        self.poll_state = PollState()
+        self._poll_timer = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -264,6 +430,7 @@ class MeridianDashboard(App):
             yield Static("Market: —", id="kpi-market")
             yield Static("Account: —", id="kpi-account")
             yield Static("Top: —", id="kpi-top")
+            yield Static("● connecting…", id="kpi-status")
         with ContentSwitcher(initial="ticker-view", id="main-view"):
             yield TickerView(id="ticker-view")
             yield PortfolioView(id="portfolio-view")
@@ -274,19 +441,45 @@ class MeridianDashboard(App):
 
     def on_mount(self) -> None:
         self.refresh_all()
-        self.set_interval(REFRESH_SEC, self.refresh_all)
+        self.set_interval(1, self._tick_clock)
 
     @work(exclusive=True, group="refresh")
     async def refresh_all(self) -> None:
-        if not self.watchlist:
-            return
-        raw = await asyncio.to_thread(bulk_fetch, self.watchlist, self.demo)
-        scored, res_by_ticker = await asyncio.to_thread(score_watchlist, self.watchlist, raw)
-        self._res_by_ticker = res_by_ticker
-        self.update_kpi_bar(scored)
-        self.query_one(PortfolioView).load_rows(scored)
-        self.render_ticker_view(self.active_ticker)
-        self.render_exec_zone()
+        """Poll the watchlist once. Always reschedules the next poll (in a
+        `finally`, via _schedule_next_poll) even if this attempt fails, so a
+        bad tick can't stall the real-time refresh loop; a failed fetch keeps
+        the last good snapshot rendered instead of blanking the dashboard."""
+        try:
+            if not self.watchlist:
+                return
+            try:
+                raw = await asyncio.to_thread(bulk_fetch, self.watchlist, self.demo)
+            except Exception:
+                raw = {}
+            self._snapshot = merge_refresh(self._snapshot, self.watchlist, raw)
+            self.poll_state = advance_poll_state(self.poll_state, self._snapshot.ok)
+            self.update_kpi_bar(self._snapshot.rows)
+            self.query_one(PortfolioView).load_rows(self._snapshot.rows)
+            self.render_ticker_view(self.active_ticker)
+            self.render_exec_zone()
+        finally:
+            self._schedule_next_poll()
+
+    def _schedule_next_poll(self) -> None:
+        """Arm the next data poll at an interval set by poll_backoff_seconds,
+        cancelling any previously-armed timer (a manual [R] refresh or a poll
+        that just completed both reschedule from here)."""
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+        delay = poll_backoff_seconds(REFRESH_SEC, self.poll_state.consecutive_failures)
+        self._poll_timer = self.set_timer(delay, self.refresh_all)
+
+    def _tick_clock(self) -> None:
+        """Per-second UI tick: refreshes the "updated Xs ago" KPI text only —
+        no I/O, no re-fetch — so the dashboard visibly feels real-time between
+        the (much slower) data polls."""
+        text = format_staleness(self.poll_state.last_success, dt.datetime.now(), self.poll_state.ok)
+        self.query_one("#kpi-status", Static).update(text)
 
     def update_kpi_bar(self, scored):
         self.query_one("#kpi-market", Static).update(f"Market: {market_session()}")
@@ -299,14 +492,14 @@ class MeridianDashboard(App):
         self.query_one("#kpi-top", Static).update(f"Top: {top_str}")
 
     def render_ticker_view(self, ticker):
-        res = self._res_by_ticker.get(ticker)
+        res = self._snapshot.res_by_ticker.get(ticker)
         if not res:
             return
         self.query_one(TickerView).render_ticker(ticker, res)
 
     def render_exec_zone(self):
         self.query_one(PositionsTable).load_rows(positions_table_rows())
-        res = self._res_by_ticker.get(self.active_ticker)
+        res = self._snapshot.res_by_ticker.get(self.active_ticker)
         reasons = catalyst_reasons(res) if res else []
         self.query_one(AlertsPanel).render_alerts(self.active_ticker or "—", reasons)
 
