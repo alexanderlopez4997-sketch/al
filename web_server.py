@@ -11,13 +11,18 @@ the browser for the interactive candles).
 
     python3 web_server.py   →   http://127.0.0.1:8787
     MERIDIAN_WEB_HOST=0.0.0.0 python3 web_server.py   →   also reachable from your phone
-                                                           on the same Wi-Fi (no login — see
-                                                           deploy/DEPLOY.md before doing this
-                                                           on a shared/public network)
+                                                           on the same Wi-Fi
+
+Protected by HTTP Basic Auth. Set MERIDIAN_USER / MERIDIAN_PASSWORD in .env for
+fixed credentials, or leave unset to get a random per-run password printed to
+the console at startup.
 """
+import base64
+import hmac
 import html as _html
 import json
 import os
+import secrets
 import socket
 import threading
 import webbrowser
@@ -44,9 +49,20 @@ import websocket_client_v2 as wsc
 import aapl_dashboard as ad
 
 PORT = 8787
-# Loopback-only by default (the dashboard has no auth — see deploy/DEPLOY.md).
-# Set MERIDIAN_WEB_HOST=0.0.0.0 to also reach it from your phone on the same Wi-Fi.
+# Loopback-only by default. Set MERIDIAN_WEB_HOST=0.0.0.0 to also reach it from
+# your phone on the same Wi-Fi (still gated by the HTTP Basic Auth below).
 HOST = os.environ.get("MERIDIAN_WEB_HOST", "127.0.0.1")
+
+# HTTP Basic Auth — required before exposing this server beyond localhost, e.g.
+# via MERIDIAN_WEB_HOST=0.0.0.0 or an ngrok tunnel. Set MERIDIAN_USER /
+# MERIDIAN_PASSWORD in .env for fixed credentials; otherwise a random password
+# is generated per run and printed to the console at startup.
+AUTH_USER = os.environ.get("MERIDIAN_USER", "admin")
+AUTH_PASSWORD = os.environ.get("MERIDIAN_PASSWORD")
+AUTH_PASSWORD_GENERATED = AUTH_PASSWORD is None
+if AUTH_PASSWORD is None:
+    AUTH_PASSWORD = secrets.token_urlsafe(12)
+
 TAG = {"txt": "#C9D6E2", "dim": "#6B7E92", "buy": "#2ECC8F", "sell": "#FF5449",
        "warn": "#E0A83B", "head": "#E8EEF5", "big": "#FFFFFF", "gold": "#C8A24B",
        "formula": "#E8D9A8", "blue": "#4F9DE0"}
@@ -374,7 +390,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b))); self.end_headers()
         self.wfile.write(b)
 
+    def _authorized(self):
+        hdr = self.headers.get("Authorization", "")
+        if not hdr.startswith("Basic "):
+            return False
+        try:
+            user, _, pwd = base64.b64decode(hdr[6:]).decode("utf-8").partition(":")
+        except Exception:
+            return False
+        return hmac.compare_digest(user, AUTH_USER) and hmac.compare_digest(pwd, AUTH_PASSWORD)
+
+    def _send_auth_challenge(self):
+        body = b"Authentication required"
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Meridian"')
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
+        if not self._authorized():
+            return self._send_auth_challenge()
         u = urlparse(self.path); q = parse_qs(u.query)
         g1 = lambda k, d="": q.get(k, [d])[0]
         demo = g1("demo", "0") == "1"
@@ -525,8 +562,11 @@ def main():
         lan_ip = _lan_ip()
         if lan_ip:
             print(f"                         http://{lan_ip}:{PORT}  (phone / other devices, same Wi-Fi)")
-        print("Note: no login is required — anyone on your network can reach this link. "
+        print("Note: reachable from your whole network — still gated by the Basic Auth login below. "
               "Set MERIDIAN_WEB_HOST=127.0.0.1 to disable network access.")
+    print(f"Basic auth — user: {AUTH_USER}  password: {AUTH_PASSWORD}"
+          + ("  (generated — set MERIDIAN_USER/MERIDIAN_PASSWORD in .env to pin it)"
+             if AUTH_PASSWORD_GENERATED else ""))
     threading.Timer(0.8, lambda: webbrowser.open(local_url)).start()
     try:
         srv.serve_forever()
