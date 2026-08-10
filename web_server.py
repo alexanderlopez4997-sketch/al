@@ -10,10 +10,15 @@ external asset is the TradingView lightweight-charts lib, loaded from a CDN in
 the browser for the interactive candles).
 
     python3 web_server.py   →   http://127.0.0.1:8787
+    MERIDIAN_WEB_HOST=0.0.0.0 python3 web_server.py   →   also reachable from your phone
+                                                           on the same Wi-Fi (no login — see
+                                                           deploy/DEPLOY.md before doing this
+                                                           on a shared/public network)
 """
 import html as _html
 import json
 import os
+import socket
 import threading
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
@@ -39,6 +44,9 @@ import websocket_client_v2 as wsc
 import aapl_dashboard as ad
 
 PORT = 8787
+# Loopback-only by default (the dashboard has no auth — see deploy/DEPLOY.md).
+# Set MERIDIAN_WEB_HOST=0.0.0.0 to also reach it from your phone on the same Wi-Fi.
+HOST = os.environ.get("MERIDIAN_WEB_HOST", "127.0.0.1")
 TAG = {"txt": "#C9D6E2", "dim": "#6B7E92", "buy": "#2ECC8F", "sell": "#FF5449",
        "warn": "#E0A83B", "head": "#E8EEF5", "big": "#FFFFFF", "gold": "#C8A24B",
        "formula": "#E8D9A8", "blue": "#4F9DE0"}
@@ -497,11 +505,29 @@ def _get_page():
         + _pill("ALPHA·V", f["av"]) + _pill("SEC·EDGAR", f["sec"]))
 
 
+def _lan_ip():
+    """Best-effort LAN IP of this machine, for the link you open on your phone."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))   # no packet actually sent, just picks the outbound interface
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
 def main():
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    url = f"http://127.0.0.1:{PORT}"
-    print(f"Meridian Web Terminal → {url}")
-    threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    local_url = f"http://127.0.0.1:{PORT}"
+    print(f"Meridian Web Terminal → {local_url}  (this machine)")
+    if HOST == "0.0.0.0":
+        lan_ip = _lan_ip()
+        if lan_ip:
+            print(f"                         http://{lan_ip}:{PORT}  (phone / other devices, same Wi-Fi)")
+        print("Note: no login is required — anyone on your network can reach this link. "
+              "Set MERIDIAN_WEB_HOST=127.0.0.1 to disable network access.")
+    threading.Timer(0.8, lambda: webbrowser.open(local_url)).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
