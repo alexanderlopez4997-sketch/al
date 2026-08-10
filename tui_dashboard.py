@@ -22,6 +22,7 @@ Not financial advice.
 """
 import argparse
 import asyncio
+import logging
 import os
 import datetime as dt
 
@@ -33,6 +34,8 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Grid
 from textual.widgets import Header, Footer, Static, DataTable, Sparkline, ContentSwitcher
+
+logger = logging.getLogger(__name__)
 
 REFRESH_SEC = 30           # floor matches quant_gui.MIN_REFRESH_SEC
 CHART_ROWS = 10            # recent bars shown in the ticker DataTable
@@ -63,8 +66,11 @@ def load_saved_watchlist():
                     toks.append(line.upper())
         if toks:
             return toks
-    except Exception:
+    except FileNotFoundError:
         pass
+    except Exception:
+        logger.warning("failed to read watchlist file %s, falling back to default watchlist",
+                        WATCHLIST_PATH, exc_info=True)
     return parse_watchlist(DEFAULT_WATCHLIST)
 
 
@@ -104,6 +110,7 @@ def score_watchlist(tickers, data):
         try:
             r = qe.analyze(t, df, "1d", None)
         except Exception:
+            logger.warning("analyze() failed for %s, skipping from dashboard", t, exc_info=True)
             continue
         res_by_ticker[t] = r
         w = r.get("whale_activity")
@@ -158,7 +165,7 @@ class TickerView(Static):
         table = self.query_one("#ticker-table", DataTable)
         table.add_columns("Close", "RSI", "MACD", "ATR", "RelVol")
 
-    def render_ticker(self, ticker, res):
+    def render_ticker(self, ticker, res, demo):
         d = res["d"]
         self.query_one("#ticker-spark", Sparkline).data = d["Close"].tail(60).tolist()
         table = self.query_one("#ticker-table", DataTable)
@@ -169,9 +176,15 @@ class TickerView(Static):
         v = res["verdict"]
         self.query_one("#ticker-verdict", Static).update(
             f"{ticker}  {v['label']}  (score {res['score']:.0f}, conviction {res['conviction']}%)")
-        events = demo_event_annotations(ticker)
-        self.query_one("#ticker-events", Static).update(
-            "   ".join(f"{label} ~{d.strftime('%b %d')}" for label, d in events))
+        # Synthetic calendar dates are demo-only — no real earnings/FOMC source
+        # exists yet (see demo_event_annotations), so never show them against
+        # live data where they could be mistaken for real dates.
+        if demo:
+            events = demo_event_annotations(ticker)
+            events_text = "   ".join(f"{label} ~{ev_date.strftime('%b %d')}" for label, ev_date in events)
+        else:
+            events_text = ""
+        self.query_one("#ticker-events", Static).update(events_text)
 
 
 class PortfolioView(Static):
@@ -302,7 +315,7 @@ class MeridianDashboard(App):
         res = self._res_by_ticker.get(ticker)
         if not res:
             return
-        self.query_one(TickerView).render_ticker(ticker, res)
+        self.query_one(TickerView).render_ticker(ticker, res, self.demo)
 
     def render_exec_zone(self):
         self.query_one(PositionsTable).load_rows(positions_table_rows())
