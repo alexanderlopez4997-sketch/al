@@ -41,8 +41,8 @@ python3 quant_engine.py --positions                  # Show all
 python3 web_server.py
 ```
 
-Opens `http://127.0.0.1:8787` on this machine only. To also open it on your
-phone (same Wi-Fi network), start it with:
+Opens `http://127.0.0.1:8788` on this machine only (set `MERIDIAN_WEB_PORT` to
+override). To also open it on your phone (same Wi-Fi network), start it with:
 
 ```bash
 MERIDIAN_WEB_HOST=0.0.0.0 python3 web_server.py
