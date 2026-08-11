@@ -9,9 +9,11 @@ same Python engine as the desktop app; no new Python dependencies (the only
 external asset is the TradingView lightweight-charts lib, loaded from a CDN in
 the browser for the interactive candles).
 
-    python3 web_server.py   →   http://127.0.0.1:8787
+    python3 web_server.py   →   http://127.0.0.1:8788
     MERIDIAN_WEB_HOST=0.0.0.0 python3 web_server.py   →   also reachable from your phone
                                                            on the same Wi-Fi
+    MERIDIAN_WEB_PORT=8787 python3 web_server.py      →   override the port (e.g. to free up
+                                                           8788 for something else)
 
 Protected by HTTP Basic Auth. Set MERIDIAN_USER / MERIDIAN_PASSWORD in .env for
 fixed credentials, or leave unset to get a random per-run password printed to
@@ -48,7 +50,10 @@ import trackrecord as tr
 import websocket_client_v2 as wsc
 import aapl_dashboard as ad
 
-PORT = 8787
+# Defaults to 8788, not 8787, so this doesn't collide with other local dashboards
+# (e.g. a separately cloned Meridian repo) that default to the more common 8787.
+# Set MERIDIAN_WEB_PORT to override.
+PORT = int(os.environ.get("MERIDIAN_WEB_PORT", "8788"))
 # Loopback-only by default. Set MERIDIAN_WEB_HOST=0.0.0.0 to also reach it from
 # your phone on the same Wi-Fi (still gated by the HTTP Basic Auth below).
 HOST = os.environ.get("MERIDIAN_WEB_HOST", "127.0.0.1")

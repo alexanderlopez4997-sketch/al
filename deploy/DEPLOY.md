@@ -1,13 +1,13 @@
 # Deploying the Meridian web dashboard on a Linux VPS
 
 This runs `web_server.py` as an always-on systemd service that restarts on crash
-and starts on boot. The server binds to **127.0.0.1:8787** (localhost only), so by
+and starts on boot. The server binds to **127.0.0.1:8788** (localhost only), so by
 default nothing is exposed to the internet — you reach it over an SSH tunnel, or
 put a reverse proxy with authentication in front of it.
 
 > **Security note:** the dashboard is protected by built-in HTTP Basic Auth
 > (set `MERIDIAN_USER` / `MERIDIAN_PASSWORD` in `.env`, or use the random
-> per-run password printed at startup). Even so, avoid exposing port 8787
+> per-run password printed at startup). Even so, avoid exposing port 8788
 > directly to the public internet — prefer the SSH-tunnel or the
 > nginx + basic-auth options below for an added layer of protection.
 
@@ -68,8 +68,8 @@ journalctl -u meridian -f               # follow logs
 
 ```bash
 # from your laptop
-ssh -L 8787:localhost:8787 youruser@your-vps
-# then open http://localhost:8787 in your browser
+ssh -L 8788:localhost:8788 youruser@your-vps
+# then open http://localhost:8788 in your browser
 ```
 
 **Option B — public via nginx + HTTP basic auth (if you want a real URL):**
@@ -88,7 +88,7 @@ server {
     location / {
         auth_basic "Meridian";
         auth_basic_user_file /etc/nginx/.meridian_htpasswd;
-        proxy_pass http://127.0.0.1:8787;
+        proxy_pass http://127.0.0.1:8788;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
