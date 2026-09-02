@@ -86,6 +86,38 @@ def _after_hours(iso):
         return False
 
 
+PRIMARY_FORMS = ("10-K", "10-Q", "DEF 14A")
+
+
+def primary_filings(ticker, timeout=15):
+    """Latest 10-K, 10-Q and proxy (DEF 14A) for `ticker`, regardless of age —
+    the source documents for research (full business/risk-factor read, executive
+    pay and insider ownership), as opposed to recent_filings()'s few-day window
+    for what just moved the stock. {} on any failure; missing forms are omitted."""
+    cik = _load_ciks().get(ticker.upper())
+    if not cik:
+        return {}
+    try:
+        d = json.loads(_get(f"https://data.sec.gov/submissions/CIK{cik}.json", timeout))
+    except Exception:
+        return {}
+    rec = d.get("filings", {}).get("recent", {})
+    forms = rec.get("form", []); dates = rec.get("filingDate", [])
+    acc = rec.get("accessionNumber", []); docs = rec.get("primaryDocument", [])
+    out = {}
+    for i in range(len(forms)):
+        f = forms[i]
+        if f not in PRIMARY_FORMS or f in out:
+            continue
+        a = acc[i].replace("-", "") if i < len(acc) else ""
+        doc = docs[i] if i < len(docs) else ""
+        if not (a and doc):
+            continue
+        out[f] = {"date": dates[i],
+                   "url": f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{a}/{doc}"}
+    return out
+
+
 def recent_filings(ticker, days=4, timeout=15):
     """Material SEC filings for `ticker` in the last `days`, newest first. Each:
     {form, note, bias, date, accepted, after_hours, url}. [] on any failure."""
