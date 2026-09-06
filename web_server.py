@@ -43,6 +43,7 @@ import quant_gui as g
 import fundamental_engine as fe
 import sentiment_engine as se
 import edgar
+import research as rs
 import orderflow as of
 import afterhours as ah
 import morning as mb
@@ -118,6 +119,92 @@ def _seg_html(segs):
     return "".join(out)
 
 
+def _fmt_big(x, prefix="$"):
+    """1234567890 -> '$1.23B'. None-safe."""
+    if x is None:
+        return "—"
+    a = abs(x)
+    if a >= 1e12:
+        s = f"{x/1e12:.2f}T"
+    elif a >= 1e9:
+        s = f"{x/1e9:.2f}B"
+    elif a >= 1e6:
+        s = f"{x/1e6:.1f}M"
+    else:
+        s = f"{x:,.0f}"
+    return f"{prefix}{s}"
+
+
+def _fmt_pct(x):
+    return f"{x:+.1f}%" if x is not None else "—"
+
+
+def _fmt_ratio(x):
+    return f"{x:.1f}" if x is not None else "—"
+
+
+# ---------------------------------------------------------------- research ---
+def _research_html(res, filings, demo):
+    """Company overview · valuation · quality · ownership · primary-source
+    links, for the collapsible Research panel under the Analyze report."""
+    if not res:
+        note = ("Set ALPHA_VANTAGE_KEY in .env for company overview, valuation "
+                "and quality metrics." if not demo else "")
+        h = '<div class="muted">Deep research unavailable for this ticker.</div>'
+        return h + (f'<div class="muted" style="margin-top:6px">{note}</div>' if note else "")
+
+    h = f'<div class="sub" style="font-size:13px;line-height:1.5">{_html.escape(res["description"])}</div>'
+    h += (f'<div class="stat" style="margin-top:10px">{_html.escape(res["sector"] or "—")} · '
+          f'{_html.escape(res["industry"] or "—")} · {_html.escape(res["exchange"] or "—")}'
+          + (f' · {int(res["employees"]):,} employees' if res.get("employees") else "") + '</div>')
+
+    def row(label, val):
+        return f'<div class="corr-row"><div class="corr-label">{label}</div><div class="corr-value">{val}</div></div>'
+
+    h += '<h3 style="color:#C8A24B">Valuation</h3><div class="corr-table">'
+    h += row("Market cap", _fmt_big(res["market_cap"]))
+    h += row("P/E (trailing / fwd)", f'{_fmt_ratio(res["pe"])} / {_fmt_ratio(res["forward_pe"])}')
+    h += row("PEG", _fmt_ratio(res["peg"]))
+    h += row("P/S · P/B", f'{_fmt_ratio(res["ps"])} · {_fmt_ratio(res["pb"])}')
+    h += row("EV/Revenue · EV/EBITDA", f'{_fmt_ratio(res["ev_revenue"])} · {_fmt_ratio(res["ev_ebitda"])}')
+    h += row("52-wk range", f'{_fmt_ratio(res["week52_low"])} – {_fmt_ratio(res["week52_high"])}')
+    h += row("Analyst target", _fmt_ratio(res["analyst_target"]))
+    h += '</div>'
+
+    h += '<h3 style="color:#C8A24B">Profitability & earnings quality</h3><div class="corr-table">'
+    h += row("Profit margin · operating margin", f'{_fmt_pct(res["profit_margin"])} · {_fmt_pct(res["operating_margin"])}')
+    h += row("ROE · ROA", f'{_fmt_pct(res["roe"])} · {_fmt_pct(res["roa"])}')
+    h += row("Revenue (TTM)", _fmt_big(res["revenue_ttm"]))
+    h += row("Net income (TTM)", _fmt_big(res["net_income_ttm"]))
+    h += row("Free cash flow (TTM)", _fmt_big(res["fcf_ttm"]))
+    gap = res.get("fcf_ni_gap_pct")
+    gap_color = "var(--sell)" if gap is not None and gap < -20 else "var(--buy)" if gap is not None and gap > 0 else "var(--amber)"
+    gap_note = (' <span class="sub">FCF well below net income — check for aggressive accruals</span>'
+                if gap is not None and gap < -20 else "")
+    h += row("FCF vs net income", f'<span style="color:{gap_color}">{_fmt_pct(gap)}</span>{gap_note}' if gap is not None else "—")
+    h += '</div>'
+
+    h += '<h3 style="color:#C8A24B">Ownership & other</h3><div class="corr-table">'
+    h += row("Insider ownership", _fmt_pct(res["pct_insiders"]))
+    h += row("Institutional ownership", _fmt_pct(res["pct_institutions"]))
+    h += row("Dividend yield", _fmt_pct(res["dividend_yield"]))
+    h += row("Beta", _fmt_ratio(res["beta"]))
+    h += '</div>'
+
+    if filings:
+        h += '<h3 style="color:#C8A24B">Primary sources</h3>'
+        names = {"10-K": "Annual report (10-K)", "10-Q": "Latest quarterly report (10-Q)",
+                 "DEF 14A": "Proxy statement — exec pay & governance (DEF 14A)"}
+        for form, info in filings.items():
+            h += (f'<div class="sub">📄 {names.get(form, form)} — {info["date"]} '
+                  f'<a href="{info["url"]}" target="_blank">open</a></div>')
+    h += ('<div class="muted" style="margin-top:12px;font-size:11px">Peer/sector-average multiples and '
+          'multi-year trend lines are not shown — the free-tier data behind this panel is a single '
+          'TTM snapshot, and faking a trend from one data point would be worse than not showing one. '
+          'Use the primary-source links above for the multi-year picture.</div>')
+    return h
+
+
 # ---------------------------------------------------------------- analyze ---
 def _full_analyze(sym, demo, optimize=False):
     res = g.screen_one(sym, demo, "6mo", "1d", optimize, cache=None, realtime_key=qe.FINNHUB_DEFAULT_KEY)
@@ -133,6 +220,8 @@ def _full_analyze(sym, demo, optimize=False):
         res["fund"] = _try(lambda: fe.fetch_fundamentals(sym, fkey, avk))
         sen = _try(lambda: se.news_sentiment(sym, fkey, avk))
         res["filings"] = _try(lambda: edgar.recent_filings(sym, days=3), [])
+        res["research"] = _try(lambda: rs.fetch_company_research(sym, avk))
+        res["primary_filings"] = _try(lambda: edgar.primary_filings(sym), {})
         if akey and asec:
             w0, w1 = of.after_hours_window()
             res["orderflow"] = _try(lambda: of.darkpool_blocks(sym, akey, asec, w0, w1, 200000))
@@ -145,6 +234,9 @@ def _full_analyze(sym, demo, optimize=False):
             pass
     elif res.get("ineligible"):
         res["alt_skipped"] = True                 # gate skipped alt-data — mark it honestly
+    if demo:
+        res["research"] = rs.demo_company_research(sym)
+        res["primary_filings"] = {}
     g.log_verdicts([{"ticker": sym, "tone": res["verdict"]["tone"], "label": res["verdict"]["label"],
                      "score": res["score"], "price": res["last"], "tags": g.verdict_tags(res)}], demo)
     segs = g.build_report_segments(res, res.get("opt"), 10000.0, 1.0)
@@ -154,7 +246,8 @@ def _full_analyze(sym, demo, optimize=False):
             "edge_status": res.get("verdict", {}).get("edge_status", "ACTIVE"),
             "information_ratio": round(res.get("verdict", {}).get("information_ratio", 0.0), 3),
             "win_rate": round(res.get("verdict", {}).get("win_rate", 0.5), 3),
-            "report": _seg_html(segs)}
+            "report": _seg_html(segs),
+            "research_html": _research_html(res.get("research"), res.get("primary_filings") or {}, demo)}
 
 
 def _ohlc(sym, demo):
@@ -737,7 +830,9 @@ async function go(){const t=$('tk').value.trim().toUpperCase()||'NVDA';
    +'<span class="px">'+a.last.toFixed(2)+' <span style="color:'+cc+'">'+(a.chg>=0?'+':'')+a.chg+'%</span></span>'
    +renderVerdict(a)
    +'<span class="badge '+cls+'">'+a.verdict+'</span></div>'
-   +'<div class="card"><div id="chart"></div></div><div class="card report">'+a.report+'</div>';
+   +'<div class="card"><div id="chart"></div></div><div class="card report">'+a.report+'</div>'
+   +'<div class="card"><details><summary style="cursor:pointer;color:var(--gold);font-weight:700;letter-spacing:1px;font-size:13px">RESEARCH — company overview · valuation · quality · ownership</summary>'
+   +'<div style="margin-top:12px">'+(a.research_html||'')+'</div></details></div>';
   drawChart(o.bars);
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 function drawChart(bars){const el=$('chart');if(!el||!window.LightweightCharts)return;
