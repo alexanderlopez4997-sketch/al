@@ -91,8 +91,7 @@ def fetch_company_research(ticker, av_key, use_cache=True):
       market_cap, pe, forward_pe, peg, ps, pb, ev_revenue, ev_ebitda,
       profit_margin, operating_margin, roe, roa,
       revenue_ttm, net_income_ttm, fcf_ttm, fcf_ni_gap_pct,
-      dividend_yield, beta, week52_high, week52_low, analyst_target,
-      pct_insiders, pct_institutions }
+      dividend_yield, beta, week52_high, week52_low, analyst_target }
     Any individual field may be None where the source didn't report it —
     fails open per-field rather than discarding the whole result."""
     if not av_key:
@@ -155,8 +154,6 @@ def fetch_company_research(ticker, av_key, use_cache=True):
         "week52_high": _num(ov.get("52WeekHigh")),
         "week52_low": _num(ov.get("52WeekLow")),
         "analyst_target": _num(ov.get("AnalystTargetPrice")),
-        "pct_insiders": _num(ov.get("PercentInsiders")),
-        "pct_institutions": _num(ov.get("PercentInstitutions")),
     }
     if use_cache:
         _write_cache(ticker, out)
@@ -190,5 +187,4 @@ def demo_company_research(ticker):
         "fcf_ni_gap_pct": round((fcf_ttm - net_income_ttm) / abs(net_income_ttm) * 100, 1) if net_income_ttm else None,
         "dividend_yield": round(((h >> 28) % 40) / 10.0, 2), "beta": round(0.5 + (h % 200) / 100.0, 2),
         "week52_high": None, "week52_low": None, "analyst_target": None,
-        "pct_insiders": round(((h >> 6) % 300) / 10.0, 1), "pct_institutions": round(20 + ((h >> 10) % 600) / 10.0, 1),
     }
