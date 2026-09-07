@@ -184,9 +184,7 @@ def _research_html(res, filings, demo):
     h += row("FCF vs net income", f'<span style="color:{gap_color}">{_fmt_pct(gap)}</span>{gap_note}' if gap is not None else "—")
     h += '</div>'
 
-    h += '<h3 style="color:#C8A24B">Ownership & other</h3><div class="corr-table">'
-    h += row("Insider ownership", _fmt_pct(res["pct_insiders"]))
-    h += row("Institutional ownership", _fmt_pct(res["pct_institutions"]))
+    h += '<h3 style="color:#C8A24B">Other</h3><div class="corr-table">'
     h += row("Dividend yield", _fmt_pct(res["dividend_yield"]))
     h += row("Beta", _fmt_ratio(res["beta"]))
     h += '</div>'
