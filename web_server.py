@@ -304,8 +304,10 @@ def _afterhours_html(tickers, demo):
     flagged = sorted([r for r in reads.values() if r["flag"]], key=lambda r: -abs(r.get("ah_chg") or 0))
     rows = ""
     for r in flagged:
-        offer = next((f for f in r["filings"] if f["bias"] < 0), None)
-        head = ("⚠ DILUTION/OFFERING" if offer else "🔔 MATERIAL FILING" if r["filings"] else "🌙 AH MOVE")
+        offer = next((f for f in r["filings"] if f["form"] in edgar.DILUTIVE_FORMS and f["bias"] < 0), None)
+        neg = next((f for f in r["filings"] if f["bias"] < 0), None)
+        head = ("⚠ DILUTION/OFFERING" if offer else "⚠ INSIDER SELLING" if neg else
+                "🔔 MATERIAL FILING" if r["filings"] else "🌙 AH MOVE")
         px = (f'<b style="color:{"#FF5449" if r["ah_chg"]<0 else "#2ECC8F"}">{r["ah_chg"]:+.1f}%</b> '
               f'→ {r["ah_price"]:.2f} vs {r["reg_close"]:.2f}' if r.get("ah_price") else "—")
         fil = "".join(f'<div class="sub">📂 {f["form"]} — {f["note"]}'

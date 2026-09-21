@@ -17,6 +17,8 @@ for. This confirms *agreement across signals*, not the future.
 """
 import math
 
+import edgar
+
 
 def _ok(cond):
     return "pass" if cond else "fail"
@@ -92,8 +94,12 @@ def confirm(res):
     if v.get("risky"):
         kills.append(("RISKY (extreme volatility)", "signal reliability degraded"))
     for f in (res.get("filings") or []):
-        if f.get("bias", 0) < 0:
+        if f.get("form") in edgar.DILUTIVE_FORMS and f.get("bias", 0) < 0:
             kills.append(("Dilution / offering filed", f"{f['form']} — {f['note']}"))
+            break
+    for f in (res.get("filings") or []):
+        if f.get("form") == "4" and f.get("bias", 0) < 0 and "flood" in f.get("note", ""):
+            kills.append(("C-suite selling flood", f"{f['form']} — {f['note']}"))
             break
 
     passed = sum(1 for _, s, _ in checks if s == "pass")
