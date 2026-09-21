@@ -14,6 +14,15 @@ best-documented edges highest:
   overnight news sentiment          — medium
   after-hours move + whale footprint + technical alignment — confirmation
 
+The insider read (`insider_sig`) is expected in the shape produced by either
+quant_engine.insider_signal() (Finnhub) or edgar.form4_insider_bias() (parsed
+Form 4 XML, role/decay-weighted, 10b5-1-discounted) — {signal, confidence,
+detail}. `filings` is edgar.recent_filings()'s output; 8-K entries there carry
+{items, impact, volatility_multiplier, session, gap_multiplier}, used below to
+scale the overnight-move contribution — a high-impact 8-K filed pre-market
+(thinnest order book of the day) implies a bigger realized gap than the same
+after-hours move carrying no fresh disclosure.
+
 HONEST SCOPE: this is a morning-PREP radar, not a prediction. It says where
 something happened overnight and WHY (with the source), ranked by how actionable
 the catalyst historically is. It does not promise the gap holds, and it reads the
@@ -27,11 +36,23 @@ def catalyst_score(tech_score, ah_chg, insider_sig, filings, sentiment, whale):
     score = 0.0
     reasons = []
 
-    # 1. After-hours move — the trigger (bounded so a wild thin print can't dominate)
+    # 0. Gap-risk multiplier from any 8-K on the tape — highest of (item-impact
+    # x session) across filings, so one high-impact pre-market 8-K dominates.
+    # Missing fields (older callers, or non-8-K forms) default to neutral 1.0.
+    gap_risk = 1.0
+    for f in (filings or []):
+        if f.get("form") == "8-K":
+            gap_risk = max(gap_risk, f.get("volatility_multiplier", 1.0) * f.get("gap_multiplier", 1.0))
+
+    # 1. After-hours move — the trigger (bounded so a wild thin print can't
+    # dominate; the bound itself scales with gap_risk so a confirmed
+    # high-impact pre-market 8-K is allowed a bigger say than an unexplained move).
     if ah_chg:
-        score += max(-25.0, min(25.0, ah_chg * 2.5))
+        cap = 25.0 * min(gap_risk, 2.0)
+        score += max(-cap, min(cap, ah_chg * 2.5 * gap_risk))
         if abs(ah_chg) >= 1.5:
-            reasons.append((f"{ah_chg:+.1f}% after-hours", 1 if ah_chg > 0 else -1))
+            tag = f" (gap risk ×{gap_risk:.1f})" if gap_risk > 1.0 else ""
+            reasons.append((f"{ah_chg:+.1f}% after-hours{tag}", 1 if ah_chg > 0 else -1))
 
     # 2. Insider open-market flow — highest weight (buys already weighted 2x in the signal)
     if insider_sig:
@@ -49,7 +70,12 @@ def catalyst_score(tech_score, ah_chg, insider_sig, filings, sentiment, whale):
             score += 12.0
             reasons.append((f"{f['form']} — {f['note']}", 1))
         elif f["form"] == "8-K":
-            reasons.append((f"8-K — material event", 0))
+            items = f.get("items") or []
+            item_txt = ("Item " + ", ".join(items)) if items else "8-K"
+            impact = f.get("impact", "low")
+            session_note = {"pre_market": " · filed pre-market (thin liquidity)",
+                            "after_hours": " · filed after-hours"}.get(f.get("session"), "")
+            reasons.append((f"{item_txt} — {impact}-impact material event{session_note}", 0))
 
     # 4. Overnight news sentiment
     if sentiment:

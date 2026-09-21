@@ -88,6 +88,27 @@ def confirm(res):
     else:
         add("Risk-on & outperforming SPY", "na")
 
+    # 10 · insider Form-4 bias (parsed XML: open-market P/S only, role/decay-weighted,
+    # 10b5-1 discounted) — a confident net-selling cluster is a kill, net buying confirms
+    ib = res.get("insider_form4")
+    if ib:
+        add("Insider Form-4 bias (EDGAR)", _ok(ib["signal"] > 0), ib.get("detail", ""))
+        if ib["signal"] < -0.3 and ib["confidence"] >= 0.3:
+            kills.append(("Insider Form-4 net selling", ib.get("detail", "")))
+    else:
+        add("Insider Form-4 bias (EDGAR)", "na")
+
+    # 11 · no unresolved high-impact 8-K (earnings/exec-change/restatement) still fresh
+    # on the tape — this is informational, not a kill: post-earnings drift is a real,
+    # DOCUMENTED anomaly (see morning.py), so a 2.02 alone should never block a signal.
+    hi8k = next((f for f in (res.get("filings") or [])
+                if f.get("form") == "8-K" and f.get("impact") == "high"), None)
+    if hi8k:
+        add("No unresolved high-impact 8-K", "fail",
+            f"Item {', '.join(hi8k.get('items') or []) or '?'} — verify before entry")
+    else:
+        add("No unresolved high-impact 8-K", "na" if not res.get("filings") else "pass")
+
     # kill-switches from other panels
     if v.get("risky"):
         kills.append(("RISKY (extreme volatility)", "signal reliability degraded"))

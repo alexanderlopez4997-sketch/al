@@ -297,6 +297,19 @@ mrisk = mb.catalyst_score(20, -8, None, [{"form": "424B5", "note": "dilution", "
 check("catalyst_score RISK on dilution", mrisk["verdict"] == "RISK / avoid")
 check("catalyst_score bounded", -100 <= mb.catalyst_score(100, 50, ins, [], None, None)["score"] <= 100)
 
+# 8-K gap-risk multiplier: a high-impact 8-K filed pre-market amplifies the
+# after-hours-move contribution vs. the same move with no 8-K on the tape
+hi8k_premkt = [{"form": "8-K", "note": "material event (8-K)", "bias": 0, "items": ["5.02"],
+                "impact": "high", "volatility_multiplier": 1.6, "session": "pre_market",
+                "gap_multiplier": 1.5}]
+plain = mb.catalyst_score(0, 3.0, None, [], None, None)
+amplified = mb.catalyst_score(0, 3.0, None, hi8k_premkt, None, None)
+check("catalyst_score amplifies AH move on high-impact pre-market 8-K", amplified["score"] > plain["score"])
+check("catalyst_score bounded even with gap-risk multiplier",
+      -100 <= mb.catalyst_score(0, 50, None, hi8k_premkt, None, None)["score"] <= 100)
+check("catalyst_score old-shape filing dicts (no 8-K fields) still work",
+      mb.catalyst_score(0, 3.0, None, [{"form": "8-K", "note": "x", "bias": 0}], None, None)["score"] >= 0)
+
 # ------------------------------------------------------------- confirmation -
 section("confirmation")
 verified = dict(r)
@@ -313,6 +326,27 @@ killed = dict(verified); killed["bt"] = dict(killed["bt"]); killed["bt"]["sharpe
 killed["filings"] = [{"form": "424B5", "note": "dilution", "bias": -1}]
 csk = cf.confirm(killed)
 check("confirm NOT VERIFIED on kill-switch", "NOT VERIFIED" in csk["headline"] and len(csk["kills"]) >= 2)
+
+# insider Form-4 bias: confident net buying confirms, confident net selling kills
+buy_bias = dict(verified); buy_bias["insider_form4"] = {"signal": 0.8, "confidence": 0.9, "detail": "CEO bought"}
+cs_buy = cf.confirm(buy_bias)
+check("confirm passes Insider Form-4 check on net buying",
+      any(l == "Insider Form-4 bias (EDGAR)" and s == "pass" for l, s, _ in cs_buy["checks"]))
+sell_bias = dict(verified); sell_bias["insider_form4"] = {"signal": -0.6, "confidence": 0.5, "detail": "CFO sold"}
+cs_sell = cf.confirm(sell_bias)
+check("confirm kills on confident insider Form-4 net selling",
+      any("Insider Form-4 net selling" in l for l, _ in cs_sell["kills"]))
+no_bias = dict(verified); no_bias.pop("insider_form4", None)
+check("confirm marks Insider Form-4 na when unavailable",
+      any(l == "Insider Form-4 bias (EDGAR)" and s == "na" for l, s, _ in cf.confirm(no_bias)["checks"]))
+
+# high-impact 8-K: informational check, never a kill on its own (earnings drift is a documented edge)
+hi8k = dict(verified); hi8k["filings"] = [{"form": "8-K", "note": "material event (8-K)", "bias": 0,
+                                           "items": ["5.02"], "impact": "high"}]
+cs_hi8k = cf.confirm(hi8k)
+check("confirm flags unresolved high-impact 8-K without killing",
+      any(l == "No unresolved high-impact 8-K" and s == "fail" for l, s, _ in cs_hi8k["checks"])
+      and not any("8-K" in l for l, _ in cs_hi8k["kills"]))
 
 # ------------------------------------------------------------- trackrecord --
 section("trackrecord")
@@ -347,6 +381,76 @@ check("MATERIAL maps offerings bearish", edgar.MATERIAL["424B5"][1] < 0)
 check("MATERIAL 8-K neutral", edgar.MATERIAL["8-K"][1] == 0)
 check("_after_hours detects evening filing", edgar._after_hours("2026-06-17T22:40:43.000Z"))
 check("_after_hours false midday", not edgar._after_hours("2026-06-17T18:00:00.000Z"))
+
+# session classification (pre-market / regular / after-hours / overnight, ET)
+check("_session pre-market", edgar._session("2026-06-17T11:00:00.000Z") == "pre_market")
+check("_session regular", edgar._session("2026-06-17T16:00:00.000Z") == "regular")
+check("_session after-hours", edgar._session("2026-06-17T21:00:00.000Z") == "after_hours")
+check("_session overnight", edgar._session("2026-06-17T09:00:00.000Z") == "overnight")
+check("_session bad input falls back neutral", edgar._session("not-a-timestamp") == "overnight")
+
+# 8-K Item code -> impact/volatility multiplier, with a graceful fallback for
+# an item code the table has never heard of
+check("_8k_impact high on 5.02 (exec change)", edgar._8k_impact(["5.02"]) == ("high", 1.6))
+check("_8k_impact low on 9.01 (exhibits only)", edgar._8k_impact(["9.01"]) == ("low", 1.0))
+check("_8k_impact low/neutral on empty items", edgar._8k_impact([]) == ("low", 1.0))
+check("_8k_impact high wins when mixed", edgar._8k_impact(["7.01", "1.01"])[0] == "high")
+check("_8k_impact unknown item code doesn't crash", edgar._8k_impact(["99.99"]) == ("low", 1.0))
+
+# Form 4 XML parsing: P (open-market buy, CEO) and S (10b5-1 plan sale) count;
+# A (grant) is dropped
+_FORM4_XML = """<?xml version="1.0"?>
+<ownershipDocument>
+  <issuer><issuerTradingSymbol>TEST</issuerTradingSymbol></issuer>
+  <reportingOwner>
+    <reportingOwnerId><rptOwnerName>Jane Doe</rptOwnerName></reportingOwnerId>
+    <reportingOwnerRelationship>
+      <isDirector>0</isDirector><isOfficer>1</isOfficer><isTenPercentOwner>0</isTenPercentOwner>
+      <officerTitle>Chief Executive Officer</officerTitle>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <transactionDate><value>2026-06-01</value></transactionDate>
+      <transactionCoding><transactionCode>P</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>1000</value></transactionShares>
+        <transactionPricePerShare><value>50</value></transactionPricePerShare>
+      </transactionAmounts>
+    </nonDerivativeTransaction>
+    <nonDerivativeTransaction>
+      <transactionDate><value>2026-06-01</value></transactionDate>
+      <transactionCoding><transactionCode>S</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>500</value></transactionShares>
+        <transactionPricePerShare><value>52</value></transactionPricePerShare>
+      </transactionAmounts>
+      <footnoteId id="F1"/>
+    </nonDerivativeTransaction>
+    <nonDerivativeTransaction>
+      <transactionDate><value>2026-06-01</value></transactionDate>
+      <transactionCoding><transactionCode>A</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>2000</value></transactionShares>
+        <transactionPricePerShare><value>0</value></transactionPricePerShare>
+      </transactionAmounts>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+  <footnotes>
+    <footnote id="F1">Sale pursuant to a Rule 10b5-1 trading plan adopted 2026-01-01.</footnote>
+  </footnotes>
+</ownershipDocument>"""
+_f4txs = edgar.parse_form4_xml(_FORM4_XML)
+check("parse_form4_xml drops grants, keeps P/S", len(_f4txs) == 2 and {t["code"] for t in _f4txs} == {"P", "S"})
+check("parse_form4_xml computes usd = shares*price", _f4txs[0]["usd"] == 50000.0)
+check("parse_form4_xml flags 10b5-1 sale via footnote", next(t for t in _f4txs if t["code"] == "S")["is_10b5_1"])
+check("parse_form4_xml P not flagged 10b5-1", not next(t for t in _f4txs if t["code"] == "P")["is_10b5_1"])
+check("parse_form4_xml malformed XML returns []", edgar.parse_form4_xml("not xml") == [])
+check("_role_weight CEO gets top weight", edgar._role_weight(_f4txs[0]) == 2.0)
+check("_role_weight ten-pct owner", edgar._role_weight({"title": "", "is_director": False,
+     "is_officer": False, "is_ten_pct_owner": True}) == edgar.TEN_PCT_OWNER_WEIGHT)
+check("_role_weight plain director default", edgar._role_weight({"title": "", "is_director": True,
+     "is_officer": False, "is_ten_pct_owner": False}) == edgar.DIRECTOR_WEIGHT)
 
 # ------------------------------------------------------------- leaderboard --
 section("leaderboard")
