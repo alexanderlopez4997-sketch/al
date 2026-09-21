@@ -26,12 +26,18 @@ def catalyst_score(tech_score, ah_chg, insider_sig, filings, sentiment, whale):
     reasons is a list of (text, direction) with direction in {+1, 0, -1}."""
     score = 0.0
     reasons = []
+    filings = filings or []
+
+    # An 8-K filed right before the open / after the close is exactly what
+    # explains an otherwise-unexplained gap — trust the after-hours move more.
+    vol_mult = max([f.get("vol_mult", 1.0) for f in filings if f["form"] == "8-K"], default=1.0)
 
     # 1. After-hours move — the trigger (bounded so a wild thin print can't dominate)
     if ah_chg:
-        score += max(-25.0, min(25.0, ah_chg * 2.5))
+        score += max(-25.0, min(25.0, ah_chg * 2.5)) * vol_mult
         if abs(ah_chg) >= 1.5:
-            reasons.append((f"{ah_chg:+.1f}% after-hours", 1 if ah_chg > 0 else -1))
+            tag = " (8-K explained)" if vol_mult > 1 else ""
+            reasons.append((f"{ah_chg:+.1f}% after-hours{tag}", 1 if ah_chg > 0 else -1))
 
     # 2. Insider open-market flow — highest weight (buys already weighted 2x in the signal)
     if insider_sig:
@@ -41,7 +47,7 @@ def catalyst_score(tech_score, ah_chg, insider_sig, filings, sentiment, whale):
             reasons.append((insider_sig.get("detail", "insider flow"), 1 if c > 0 else -1))
 
     # 3. Material SEC filings — offering = dilution (bearish), bullish stake/8-K
-    for f in (filings or [])[:3]:
+    for f in filings[:3]:
         if f["bias"] < 0:
             score -= 20.0
             reasons.append((f"{f['form']} — {f['note']}", -1))
@@ -49,7 +55,7 @@ def catalyst_score(tech_score, ah_chg, insider_sig, filings, sentiment, whale):
             score += 12.0
             reasons.append((f"{f['form']} — {f['note']}", 1))
         elif f["form"] == "8-K":
-            reasons.append((f"8-K — material event", 0))
+            reasons.append((f"{f['form']} — {f['note']}", 0))
 
     # 4. Overnight news sentiment
     if sentiment:
