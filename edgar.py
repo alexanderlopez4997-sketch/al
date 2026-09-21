@@ -22,10 +22,13 @@ Two things go a level deeper than the submissions-index metadata above:
 
   Form 4 XML   the actual transaction table is parsed (not just "a Form 4 was
                filed") so open-market buys/sells (code P/S) can be told apart
-               from grants, option exercises and tax withholding (A/M/F/D),
-               10b5-1 scheduled-plan trades can be discounted, and the
-               reporting person's role (CEO/CFO/10%+ owner vs. director) can
-               be weighted — see form4_insider_bias().
+               from grants, option exercises and tax withholding (A/M/F/D).
+               recent_filings() parses each Form 4's OWN transactions (via
+               _parse_form4) to set a real per-filing bias/note and flag
+               C-suite/flood clustering (_flag_insider_flood); for a
+               role-weighted, 10b5-1-discounted AGGREGATE across a rolling
+               24-72h window with exponential time decay, see
+               form4_insider_bias() further down.
   8-K items    the Item codes (e.g. 5.02 exec change, 2.02 results) drive a
                volatility multiplier, and the filing's session (pre-market /
                after-hours) drives a gap-risk multiplier — see recent_filings().
@@ -34,6 +37,7 @@ No API key. SEC requires a declarative User-Agent and allows ~10 req/s.
 """
 import json
 import os
+import re
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -42,6 +46,8 @@ from datetime import date, datetime, timedelta, timezone
 SEC_UA = {"User-Agent": "Meridian Research meridian-app contact@example.com"}
 _CIK_CACHE = os.path.expanduser("~/.meridian_cache/edgar_ciks.json")
 _cik_map = {}
+
+DILUTIVE_FORMS = {"S-3", "S-3ASR", "424B5", "424B4", "424B3"}
 
 # form -> (plain-English meaning, directional bias: -1 bearish / 0 neutral / +1 bullish)
 MATERIAL = {
@@ -59,10 +65,30 @@ MATERIAL = {
     "10-K": ("annual report", 0),
 }
 
+# 8-K item numbers that historically drive the biggest gaps (exec shifts,
+# bankruptcy, M&A, delisting) — used to tag the note, not to guess direction.
+EXEC_ITEMS = {
+    "5.02": "exec/director change",
+    "1.03": "bankruptcy",
+    "2.01": "acquisition/disposition",
+    "3.01": "delisting notice",
+}
+
+C_SUITE_RE = re.compile(r"\b(chief|ceo|cfo|coo|cto|president|chairman)\b", re.I)
+
+# Form 4 transaction codes that are genuine open-market sentiment (not a
+# grant/exercise/gift/tax-withholding, which say nothing about conviction).
+_OPEN_MARKET = {"P": 1, "S": -1}
+
 
 def _get(url, timeout=15):
     with urllib.request.urlopen(urllib.request.Request(url, headers=SEC_UA), timeout=timeout) as r:
         return r.read().decode()
+
+
+def _get_bytes(url, timeout=15):
+    with urllib.request.urlopen(urllib.request.Request(url, headers=SEC_UA), timeout=timeout) as r:
+        return r.read()
 
 
 def _load_ciks():
@@ -146,6 +172,59 @@ def _8k_impact(items):
     return impact, ITEM_VOLATILITY_MULTIPLIER[impact]
 
 
+def _parse_form4(url, timeout=15):
+    """Fetch + parse a Form 4 ownership XML into the reporting owner and their
+    genuine open-market activity. Returns {owner, title, is_csuite, buy_usd,
+    sell_usd} or None on any failure. Grants, option exercises, tax
+    withholding and gifts are excluded — they're not a conviction signal,
+    only actual open-market P(urchase)/S(ale) transactions are counted."""
+    try:
+        root = ET.fromstring(_get_bytes(url, timeout))
+    except Exception:
+        return None
+    owner_el = root.find("reportingOwner")
+    if owner_el is None:
+        return None
+    name = (owner_el.findtext("reportingOwnerId/rptOwnerName") or "").strip()
+    rel = owner_el.find("reportingOwnerRelationship")
+    title = (rel.findtext("officerTitle") or "").strip() if rel is not None else ""
+    buy_usd = sell_usd = 0.0
+    for tx in root.findall(".//nonDerivativeTransaction"):
+        code = (tx.findtext("transactionCoding/transactionCode") or "").strip()
+        if code not in _OPEN_MARKET:
+            continue
+        try:
+            shares = float(tx.findtext("transactionAmounts/transactionShares/value") or 0)
+            price = float(tx.findtext("transactionAmounts/transactionPricePerShare/value") or 0)
+        except ValueError:
+            continue
+        if code == "P":
+            buy_usd += shares * price
+        else:
+            sell_usd += shares * price
+    return {"owner": name, "title": title, "is_csuite": bool(C_SUITE_RE.search(title)),
+            "buy_usd": buy_usd, "sell_usd": sell_usd}
+
+
+def _flag_insider_flood(filings):
+    """Upgrade Form 4 notes in-place when >=2 distinct insiders transact the
+    same way in the window: a flood of open-market buys is a strong bullish
+    tell, while multiple C-suite officers selling at once can signal
+    overhead resistance rather than routine diversification."""
+    form4 = [f for f in filings if f["form"] == "4" and f.get("_owner")]
+    buyers = {f["_owner"] for f in form4 if f["bias"] > 0}
+    csuite_sellers = {f["_owner"] for f in form4 if f["bias"] < 0 and f["_csuite"]}
+    if len(buyers) >= 2:
+        for f in form4:
+            if f["bias"] > 0:
+                f["note"] = f"insider buying flood (Form 4) — {len(buyers)} insiders buying"
+    if len(csuite_sellers) >= 2:
+        for f in form4:
+            if f["bias"] < 0 and f["_csuite"]:
+                f["note"] = (f"C-suite selling flood (Form 4) — {len(csuite_sellers)} officers "
+                             "selling, overhead-resistance risk")
+
+
 PRIMARY_FORMS = ("10-K", "10-Q", "DEF 14A")
 
 
@@ -181,8 +260,21 @@ def primary_filings(ticker, timeout=15):
 def recent_filings(ticker, days=4, timeout=15):
     """Material SEC filings for `ticker` in the last `days`, newest first. Each:
     {form, note, bias, date, accepted, after_hours, url}, plus for 8-K filings:
-    {items, impact, volatility_multiplier, session, gap_multiplier}. [] on any
-    failure (network, missing ticker, malformed response)."""
+    {items, impact, volatility_multiplier, session, gap_multiplier, vol_mult}.
+    [] on any failure (network, missing ticker, malformed response).
+
+    Form 4s are parsed for their OWN transactions (_parse_form4) so `bias`
+    reflects real insider sentiment (open-market buy = bullish, sell =
+    bearish) rather than just "a Form 4 was filed"; a flood of buying
+    insiders or multiple C-suite officers selling at once is called out in
+    `note` (_flag_insider_flood). For a role-weighted, 10b5-1-discounted
+    AGGREGATE across a rolling 24-72h window with exponential time decay
+    (rather than one filing's own transactions), see form4_insider_bias().
+
+    8-K entries get both a precise per-Item volatility multiplier
+    (`volatility_multiplier`, from the exact Item codes) and a session-based
+    gap-risk multiplier (`gap_multiplier`, pre-market > after-hours > regular)
+    — `vol_mult` is their product, for callers that just want one number."""
     cik = _load_ciks().get(ticker.upper())
     if not cik:
         return []
@@ -206,28 +298,51 @@ def recent_filings(ticker, days=4, timeout=15):
         url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{a}/{doc}"
                if a and doc else f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}")
         accepted = acct[i] if i < len(acct) else ""
-        entry = {"form": f, "note": note, "bias": bias, "date": dates[i],
-                 "accepted": accepted, "after_hours": _after_hours(accepted) if accepted else False,
-                 "url": url}
-        if f == "8-K":
+        ah = _after_hours(accepted) if accepted else False
+        owner = csuite = None
+        extra = {}
+        if f == "4" and a and doc:
+            detail = _parse_form4(url, timeout)
+            if detail:
+                owner, csuite = detail["owner"], detail["is_csuite"]
+                if detail["buy_usd"] != detail["sell_usd"] and (detail["buy_usd"] or detail["sell_usd"]):
+                    bias = 1 if detail["buy_usd"] > detail["sell_usd"] else -1
+                    usd = detail["buy_usd"] if bias > 0 else detail["sell_usd"]
+                    who = detail["title"] or "insider"
+                    note = f"insider {'buy' if bias > 0 else 'sell'} (Form 4) — {who} ${usd/1e6:.1f}M"
+        elif f == "8-K":
             try:
                 raw_items = items_col[i] if i < len(items_col) else ""
                 item_codes = [it.strip() for it in (raw_items or "").split(",") if it.strip()]
             except Exception:
                 item_codes = []
-            impact, vol_mult = _8k_impact(item_codes)
+            tag = next((EXEC_ITEMS[c] for c in item_codes if c in EXEC_ITEMS), None)
+            if tag:
+                note = f"material event (8-K) — {tag}"
+            impact, item_mult = _8k_impact(item_codes)
             session = _session(accepted) if accepted else "overnight"
-            entry.update({"items": item_codes, "impact": impact, "volatility_multiplier": vol_mult,
-                          "session": session, "gap_multiplier": SESSION_GAP_MULTIPLIER.get(session, 1.0)})
+            gap_mult = SESSION_GAP_MULTIPLIER.get(session, 1.0)
+            extra = {"items": item_codes, "impact": impact, "volatility_multiplier": item_mult,
+                     "session": session, "gap_multiplier": gap_mult,
+                     "vol_mult": round(item_mult * gap_mult, 3)}
+        entry = {"form": f, "note": note, "bias": bias, "date": dates[i],
+                 "accepted": accepted, "after_hours": ah, "url": url,
+                 "_owner": owner, "_csuite": csuite}
+        entry.update(extra)
         out.append(entry)
+    _flag_insider_flood(out)
+    for e in out:
+        del e["_owner"], e["_csuite"]
     return out
 
 
 # ===================================================================== Form 4 XML =====
-# recent_filings() above only knows "a Form 4 was filed" — it can't tell an
-# opportunistic $2M open-market buy from a routine RSU vest, because that
-# distinction lives inside the filing, not the submissions index. Everything
-# below fetches and parses the actual Form 4 XML to make that distinction.
+# recent_filings() above parses each Form 4's OWN transactions in isolation
+# (via _parse_form4) to set that ONE filing's bias/note. It can't tell an
+# opportunistic $2M open-market buy from a routine RSU vest across MULTIPLE
+# filings in a rolling window with role weighting and time decay, because
+# that needs its own aggregation pass — that's what form4_insider_bias() below
+# does, fetching and parsing each filing's XML directly (parse_form4_xml).
 
 # Transaction codes: only open-market purchases/sales say anything about
 # conviction. Grants/awards (A) and option exercises (M) are compensation,

@@ -35,14 +35,18 @@ def catalyst_score(tech_score, ah_chg, insider_sig, filings, sentiment, whale):
     reasons is a list of (text, direction) with direction in {+1, 0, -1}."""
     score = 0.0
     reasons = []
+    filings = filings or []
 
     # 0. Gap-risk multiplier from any 8-K on the tape — highest of (item-impact
     # x session) across filings, so one high-impact pre-market 8-K dominates.
-    # Missing fields (older callers, or non-8-K forms) default to neutral 1.0.
+    # `vol_mult` (their product, or a plain after-hours flag on older-shaped
+    # filing dicts) is read as a fallback so callers passing either edgar.py
+    # shape still get a multiplier > 1 when an 8-K explains the move.
     gap_risk = 1.0
     for f in (filings or []):
         if f.get("form") == "8-K":
-            gap_risk = max(gap_risk, f.get("volatility_multiplier", 1.0) * f.get("gap_multiplier", 1.0))
+            gap_risk = max(gap_risk, f.get("volatility_multiplier", 1.0) * f.get("gap_multiplier", 1.0),
+                           f.get("vol_mult", 1.0))
 
     # 1. After-hours move — the trigger (bounded so a wild thin print can't
     # dominate; the bound itself scales with gap_risk so a confirmed
@@ -62,7 +66,7 @@ def catalyst_score(tech_score, ah_chg, insider_sig, filings, sentiment, whale):
             reasons.append((insider_sig.get("detail", "insider flow"), 1 if c > 0 else -1))
 
     # 3. Material SEC filings — offering = dilution (bearish), bullish stake/8-K
-    for f in (filings or [])[:3]:
+    for f in filings[:3]:
         if f["bias"] < 0:
             score -= 20.0
             reasons.append((f"{f['form']} — {f['note']}", -1))
@@ -75,7 +79,10 @@ def catalyst_score(tech_score, ah_chg, insider_sig, filings, sentiment, whale):
             impact = f.get("impact", "low")
             session_note = {"pre_market": " · filed pre-market (thin liquidity)",
                             "after_hours": " · filed after-hours"}.get(f.get("session"), "")
-            reasons.append((f"{item_txt} — {impact}-impact material event{session_note}", 0))
+            plain_tag = (f["note"].split(" — ", 1)[1]
+                        if f.get("note", "").startswith("material event (8-K) — ") else "")
+            tag_note = f" ({plain_tag})" if plain_tag else ""
+            reasons.append((f"{item_txt} — {impact}-impact material event{session_note}{tag_note}", 0))
 
     # 4. Overnight news sentiment
     if sentiment:

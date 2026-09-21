@@ -2541,12 +2541,14 @@ class App:
         Every line is real/sourced — no fabricated 'institutional block prints'."""
         bar = "┌" + "─" * 56 + "┐\n"
         filings = r.get("filings") or []
-        offering = next((f for f in filings if f["bias"] < 0), None)
+        offering = next((f for f in filings if f["form"] in edgar.DILUTIVE_FORMS and f["bias"] < 0), None)
+        neg = next((f for f in filings if f["bias"] < 0), None)
         headline = (f"⚠ DILUTION/OFFERING" if offering else
+                    "⚠ INSIDER SELLING" if neg else
                     "🔔 MATERIAL FILING" if filings else "🌙 AFTER-HOURS MOVE")
         o.insert("end", bar, "dim")
         o.insert("end", f"  🔔 {r['ticker']}  ", "big")
-        o.insert("end", f"{headline}\n", "sell" if offering else "warn")
+        o.insert("end", f"{headline}\n", "sell" if (offering or neg) else "warn")
         # price line
         if r.get("ah_price"):
             tag = "sell" if r["ah_chg"] < 0 else "buy"
