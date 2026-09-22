@@ -33,11 +33,16 @@ Two things go a level deeper than the submissions-index metadata above:
                volatility multiplier, and the filing's session (pre-market /
                after-hours) drives a gap-risk multiplier — see recent_filings().
 
-No API key. SEC requires a declarative User-Agent and allows ~10 req/s.
+No API key. SEC requires a declarative User-Agent and allows ~10 req/s — every
+outbound request funnels through _get()/_get_bytes() below, which enforce
+that ceiling with a token bucket and dedupe repeat fetches with an in-memory
+TTL cache (see RATE LIMITING & CACHING further down).
 """
+import collections
 import json
 import os
 import re
+import threading
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -81,14 +86,140 @@ C_SUITE_RE = re.compile(r"\b(chief|ceo|cfo|coo|cto|president|chairman)\b", re.I)
 _OPEN_MARKET = {"P": 1, "S": -1}
 
 
-def _get(url, timeout=15):
-    with urllib.request.urlopen(urllib.request.Request(url, headers=SEC_UA), timeout=timeout) as r:
-        return r.read().decode()
+# =============================================================== RATE LIMITING & CACHING ===
+# This module is called from several ThreadPoolExecutor workers at once
+# (recent_filings() + form4_insider_bias() for N tickers, each pulling a
+# submissions index plus one XML fetch per Form 4 found) — with no shared
+# throttle, that fans out to way more than 10 concurrent requests to SEC
+# well before any single caller's own rate limiting could kick in. Both
+# problems are solved once, centrally, in _get_bytes() — every fetch in this
+# module (including the pre-existing _get_bytes() Form 4 path) goes through it.
+
+# A token bucket, not a fixed-window counter: a fixed window (e.g. "reset a
+# counter to 0 every second") allows a full quota at the END of one window
+# immediately followed by a full quota at the START of the next — up to 2x
+# the intended rate in the 1-second window straddling the boundary. A token
+# bucket has no such edge: over ANY window of length T, the number of
+# requests it can release is bounded by `capacity + rate * T` (start with a
+# full bucket, then accrue at `rate` for the rest of the window). Solving
+# that for T=1s with real margin under SEC's ~10 req/s ceiling:
+#   capacity=2.0, rate=7.0  ->  worst case in any 1s window = 2 + 7*1 = 9 req/s
+# comfortably, provably under 10 — not just "usually" under it.
+RATE_LIMIT_PER_SEC = 7.0
+RATE_LIMIT_BURST = 2.0
+
+
+class _TokenBucket:
+    """Thread-safe, blocking token bucket. acquire() sleeps (never busy-polls
+    past its own lock) until a token is available, then takes it."""
+
+    def __init__(self, rate, capacity):
+        self.rate = float(rate)
+        self.capacity = float(capacity)
+        self._tokens = float(capacity)
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self):
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._tokens = min(self.capacity, self._tokens + (now - self._last) * self.rate)
+                self._last = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                wait = (1.0 - self._tokens) / self.rate
+            time.sleep(wait)
+
+
+_RATE_LIMITER = _TokenBucket(RATE_LIMIT_PER_SEC, RATE_LIMIT_BURST)
+
+# In-memory response cache, keyed by URL, storing raw bytes so _get() (text)
+# and _get_bytes() (bytes) share one entry — a Form 4 XML fetched via one
+# path warms the cache for the other rather than double-fetching the same
+# accession. TTL differs by what the URL actually is: a submissions index
+# (".../submissions/CIK*.json") is the "recent filings" list and changes
+# intraday as new filings land, so it gets a short TTL; an individual filed
+# document (".../Archives/edgar/data/...") is immutable the moment SEC
+# accepts it — an accession number is never revised in place — so it's
+# cached far longer. No persistence: cleared on process restart, like the
+# ticker->CIK map's own in-memory tier.
+HTTP_CACHE_MAXSIZE = 1024
+SUBMISSIONS_CACHE_TTL = 60.0        # seconds — "recent" filings can change any minute
+DOCUMENT_CACHE_TTL = 6 * 3600.0     # seconds — a filed document never changes
+
+
+class _TTLCache:
+    """Thread-safe in-memory cache: per-entry TTL, LRU eviction past maxsize."""
+
+    _MISS = object()
+
+    def __init__(self, maxsize):
+        self._maxsize = maxsize
+        self._data = {}                     # key -> (expires_at or None, value)
+        self._order = collections.OrderedDict()  # key -> None, insertion/access order
+        self._lock = threading.Lock()
+
+    def get(self, key):
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                return self._MISS
+            expires_at, value = entry
+            if expires_at is not None and time.monotonic() >= expires_at:
+                del self._data[key]
+                self._order.pop(key, None)
+                return self._MISS
+            self._order.move_to_end(key)
+            return value
+
+    def set(self, key, value, ttl):
+        with self._lock:
+            self._data[key] = ((time.monotonic() + ttl) if ttl is not None else None, value)
+            self._order[key] = None
+            self._order.move_to_end(key)
+            while len(self._order) > self._maxsize:
+                oldest, _ = self._order.popitem(last=False)
+                self._data.pop(oldest, None)
+
+    def clear(self):
+        with self._lock:
+            self._data.clear()
+            self._order.clear()
+
+
+_HTTP_CACHE = _TTLCache(HTTP_CACHE_MAXSIZE)
+
+
+def _cache_ttl_for(url):
+    if "/submissions/" in url:
+        return SUBMISSIONS_CACHE_TTL
+    if "/Archives/edgar/data/" in url:
+        return DOCUMENT_CACHE_TTL
+    return SUBMISSIONS_CACHE_TTL  # conservative default (e.g. company_tickers.json)
+
+
+def clear_http_cache():
+    """Drop every cached SEC response. Callers rarely need this — a stale
+    submissions-index entry self-expires within SUBMISSIONS_CACHE_TTL — but
+    it's here for tests and for forcing a fresh read on demand."""
+    _HTTP_CACHE.clear()
 
 
 def _get_bytes(url, timeout=15):
+    cached = _HTTP_CACHE.get(url)
+    if cached is not _TTLCache._MISS:
+        return cached
+    _RATE_LIMITER.acquire()
     with urllib.request.urlopen(urllib.request.Request(url, headers=SEC_UA), timeout=timeout) as r:
-        return r.read()
+        data = r.read()
+    _HTTP_CACHE.set(url, data, _cache_ttl_for(url))
+    return data
+
+
+def _get(url, timeout=15):
+    return _get_bytes(url, timeout).decode()
 
 
 def _load_ciks():
@@ -155,12 +286,21 @@ def _session(iso):
 SESSION_GAP_MULTIPLIER = {"pre_market": 1.5, "after_hours": 1.2, "regular": 1.0, "overnight": 1.1}
 
 # 8-K Item codes whose disclosures historically carry the most next-session
-# volatility: entry into a material agreement, results of operations,
-# non-reliance on previously issued financials (restatement), and officer/
-# director changes. Everything else (general corporate items, Reg FD, etc.)
-# gets the low multiplier. An Item code this dict has never heard of still
-# resolves safely to "low" — no KeyError, no crash.
-HIGH_IMPACT_8K_ITEMS = {"1.01", "2.02", "4.02", "5.02"}
+# volatility: entry into a material agreement (1.01), results of operations
+# (2.02), non-reliance on previously issued financials/restatement (4.02),
+# and officer/director changes (5.02) — plus every code EXEC_ITEMS above
+# already tags as a "biggest gap" driver (bankruptcy, M&A, delisting), via
+# the set union below. That union matters: EXEC_ITEMS and this set used to
+# be maintained independently, and drifted apart — a bankruptcy (1.03), M&A
+# (2.01), or delisting (3.01) 8-K got its `note` correctly labeled but was
+# silently scored low-impact/low-volatility, exactly backwards for events
+# EXEC_ITEMS's own comment names as top gap drivers. Deriving this set from
+# EXEC_ITEMS's keys means that class of bug can't recur: tag a new item
+# there and it's automatically high-impact here too. Everything else
+# (general corporate items, Reg FD, exhibits) gets the low multiplier; an
+# Item code neither table has ever heard of still resolves safely to "low"
+# — no KeyError, no crash.
+HIGH_IMPACT_8K_ITEMS = {"1.01", "2.02", "4.02", "5.02"} | set(EXEC_ITEMS)
 ITEM_VOLATILITY_MULTIPLIER = {"high": 1.6, "low": 1.0}
 
 
@@ -174,10 +314,11 @@ def _8k_impact(items):
 
 def _parse_form4(url, timeout=15):
     """Fetch + parse a Form 4 ownership XML into the reporting owner and their
-    genuine open-market activity. Returns {owner, title, is_csuite, buy_usd,
-    sell_usd} or None on any failure. Grants, option exercises, tax
-    withholding and gifts are excluded — they're not a conviction signal,
-    only actual open-market P(urchase)/S(ale) transactions are counted."""
+    genuine open-market activity. Returns {owner, title, is_csuite, is_director,
+    is_officer, is_ten_pct_owner, buy_usd, sell_usd} or None on any failure.
+    Grants, option exercises, tax withholding and gifts are excluded — they're
+    not a conviction signal, only actual open-market P(urchase)/S(ale)
+    transactions are counted."""
     try:
         root = ET.fromstring(_get_bytes(url, timeout))
     except Exception:
@@ -188,6 +329,9 @@ def _parse_form4(url, timeout=15):
     name = (owner_el.findtext("reportingOwnerId/rptOwnerName") or "").strip()
     rel = owner_el.find("reportingOwnerRelationship")
     title = (rel.findtext("officerTitle") or "").strip() if rel is not None else ""
+    is_director = (rel.findtext("isDirector") or "0").strip() in ("1", "true", "True") if rel is not None else False
+    is_officer = (rel.findtext("isOfficer") or "0").strip() in ("1", "true", "True") if rel is not None else False
+    is_ten_pct = (rel.findtext("isTenPercentOwner") or "0").strip() in ("1", "true", "True") if rel is not None else False
     buy_usd = sell_usd = 0.0
     for tx in root.findall(".//nonDerivativeTransaction"):
         code = (tx.findtext("transactionCoding/transactionCode") or "").strip()
@@ -203,6 +347,7 @@ def _parse_form4(url, timeout=15):
         else:
             sell_usd += shares * price
     return {"owner": name, "title": title, "is_csuite": bool(C_SUITE_RE.search(title)),
+            "is_director": is_director, "is_officer": is_officer, "is_ten_pct_owner": is_ten_pct,
             "buy_usd": buy_usd, "sell_usd": sell_usd}
 
 
@@ -267,9 +412,14 @@ def recent_filings(ticker, days=4, timeout=15):
     reflects real insider sentiment (open-market buy = bullish, sell =
     bearish) rather than just "a Form 4 was filed"; a flood of buying
     insiders or multiple C-suite officers selling at once is called out in
-    `note` (_flag_insider_flood). For a role-weighted, 10b5-1-discounted
-    AGGREGATE across a rolling 24-72h window with exponential time decay
-    (rather than one filing's own transactions), see form4_insider_bias().
+    `note` (_flag_insider_flood). Each Form 4 entry also carries `buy_usd`,
+    `sell_usd`, `title` (reporting person's role), `owner_name`, and
+    `is_director`/`is_officer`/`is_ten_pct_owner` as plain fields — not just
+    baked into `note` — for callers (e.g. a UI badge, or signal_score() below)
+    that want the structured amount/role rather than a parsed string. For a
+    role-weighted, 10b5-1-discounted AGGREGATE across a rolling 24-72h
+    window with exponential time decay (rather than one filing's own
+    transactions), see form4_insider_bias().
 
     8-K entries get both a precise per-Item volatility multiplier
     (`volatility_multiplier`, from the exact Item codes) and a session-based
@@ -305,6 +455,10 @@ def recent_filings(ticker, days=4, timeout=15):
             detail = _parse_form4(url, timeout)
             if detail:
                 owner, csuite = detail["owner"], detail["is_csuite"]
+                extra = {"buy_usd": detail["buy_usd"], "sell_usd": detail["sell_usd"],
+                         "title": detail["title"], "owner_name": detail["owner"],
+                         "is_director": detail["is_director"], "is_officer": detail["is_officer"],
+                         "is_ten_pct_owner": detail["is_ten_pct_owner"]}
                 if detail["buy_usd"] != detail["sell_usd"] and (detail["buy_usd"] or detail["sell_usd"]):
                     bias = 1 if detail["buy_usd"] > detail["sell_usd"] else -1
                     usd = detail["buy_usd"] if bias > 0 else detail["sell_usd"]
@@ -337,6 +491,40 @@ def recent_filings(ticker, days=4, timeout=15):
     return out
 
 
+# Max magnitude signal_score() can produce: bias in {-1, 0, 1} times the
+# widest role weight (CEO_CFO_WEIGHT below, once defined).
+SIGNAL_SCORE_BOUND = 2.0
+
+
+def signal_score(row):
+    """Composite, sign-directional strength for one recent_filings() row —
+    `bias` scaled by the row's own weight, so magnitude is comparable across
+    row types: bigger |signal_score| = a stronger, more-conviction-weighted
+    signal, same sign convention as `bias` (positive = bullish).
+
+      Form 4  -> role weight from _role_weight(): CEO/CFO 2.0x, any other
+                 officer or 10%+ owner 1.5x, plain director 1.0x.
+      8-K     -> item/session volatility multiplier (volatility_multiplier *
+                 gap_multiplier); `bias` is always 0 for 8-K (this app never
+                 guesses an 8-K's direction), so this is honestly 0 too —
+                 an 8-K is an attention flag, not a directional signal.
+      other   -> bias alone (weight 1.0) — a dilution filing or an activist
+                 stake disclosure doesn't carry a role or item code to weight by.
+
+    Missing/unrecognized fields fall back to neutral (bias 0 or weight 1.0),
+    never raise. Rounded to 3 places and clamped to ±SIGNAL_SCORE_BOUND as a
+    defensive bound, not because either weighting scheme can exceed it today."""
+    bias = row.get("bias") or 0
+    form = row.get("form")
+    if form == "4":
+        weight = _role_weight(row)
+    elif form == "8-K":
+        weight = row.get("volatility_multiplier", 1.0) * row.get("gap_multiplier", 1.0)
+    else:
+        weight = 1.0
+    return round(max(-SIGNAL_SCORE_BOUND, min(SIGNAL_SCORE_BOUND, bias * weight)), 3)
+
+
 # ===================================================================== Form 4 XML =====
 # recent_filings() above parses each Form 4's OWN transactions in isolation
 # (via _parse_form4) to set that ONE filing's bias/note. It can't tell an
@@ -353,20 +541,23 @@ BULLISH_CODES = {"P"}   # open-market purchase
 BEARISH_CODES = {"S"}   # open-market sale
 IGNORED_CODES = {"A", "M", "F", "D", "G"}
 
-# Reporting-person role -> weight. A CEO/CFO spending their own cash on the
-# open market is a stronger signal than a director's routine trade; a 10%+
-# owner sits between the two (economically motivated, but often a fund with
-# its own liquidity needs rather than a pure conviction signal).
-_TITLE_WEIGHTS = (
-    (("chief executive officer", " ceo", "ceo "), 2.0),
-    (("chief financial officer", " cfo", "cfo "), 1.8),
-    (("chief operating officer", " coo", "coo "), 1.6),
-    (("president",), 1.4),
-)
-TEN_PCT_OWNER_WEIGHT = 1.75
-OFFICER_WEIGHT = 1.2
+# Reporting-person role -> weight, a 3-tier scheme: the two roles with full
+# P&L/operational visibility (CEO, CFO) spending their own cash carry the
+# top multiplier; any other officer (COO, President, General Counsel, ...)
+# or a 10%+ beneficial owner gets a mid-tier bump (economically motivated,
+# even without a C-suite title); a plain director is the baseline.
+CEO_CFO_WEIGHT = 2.0
+OFFICER_WEIGHT = 1.5
 DIRECTOR_WEIGHT = 1.0
-DEFAULT_ROLE_WEIGHT = 1.0
+TEN_PCT_OWNER_WEIGHT = OFFICER_WEIGHT
+DEFAULT_ROLE_WEIGHT = DIRECTOR_WEIGHT
+
+# Substring match on the free-text officerTitle, not an exact-title lookup —
+# SEC filings spell the same role inconsistently ("Chief Executive Officer"
+# vs "President and Chief Executive Officer" vs "Chief Executive Officer &
+# President"), so a plain lookup would silently miss real CEOs/CFOs.
+_CEO_CFO_TITLE_MARKERS = ("chief executive officer", " ceo", "ceo ",
+                          "chief financial officer", " cfo", "cfo ")
 
 # A transaction flagged as executed under a Rule 10b5-1 trading plan was
 # scheduled in advance, often months earlier — it is compliance housekeeping,
@@ -402,18 +593,14 @@ def _child_text(elem, name, default=None):
 
 
 def _role_weight(tx):
-    """Reporting-person role on one parsed transaction -> a scoring weight."""
+    """Reporting-person role on one parsed transaction -> a scoring weight:
+    CEO/CFO = 2.0x, any other officer or 10%+ owner = 1.5x, director = 1.0x."""
     title = (tx.get("title") or "").lower()
-    for keys, w in _TITLE_WEIGHTS:
-        if any(k in title for k in keys):
-            return w
-    if tx.get("is_ten_pct_owner"):
-        return TEN_PCT_OWNER_WEIGHT
-    if tx.get("is_officer"):
+    if any(marker in title for marker in _CEO_CFO_TITLE_MARKERS):
+        return CEO_CFO_WEIGHT
+    if tx.get("is_officer") or tx.get("is_ten_pct_owner"):
         return OFFICER_WEIGHT
-    if tx.get("is_director"):
-        return DIRECTOR_WEIGHT
-    return DEFAULT_ROLE_WEIGHT
+    return DIRECTOR_WEIGHT
 
 
 def parse_form4_xml(xml_text):

@@ -68,6 +68,14 @@ AUTH_PASSWORD_GENERATED = AUTH_PASSWORD is None
 if AUTH_PASSWORD is None:
     AUTH_PASSWORD = secrets.token_urlsafe(12)
 
+# CORS — off by default (same-origin only). Set MERIDIAN_CORS_ORIGIN to the
+# origin your separate frontend runs on (e.g. http://localhost:5173) to let
+# it call /api/feed directly, or to "*" for any origin. Scoped to /api/feed
+# only, not the whole API surface: that endpoint is read-only EDGAR/news
+# data, unlike /api/analyze and friends which can reflect account-sizing
+# inputs back in their output.
+CORS_ORIGIN = os.environ.get("MERIDIAN_CORS_ORIGIN", "")
+
 TAG = {"txt": "#C9D6E2", "dim": "#6B7E92", "buy": "#2ECC8F", "sell": "#FF5449",
        "warn": "#E0A83B", "head": "#E8EEF5", "big": "#FFFFFF", "gold": "#C8A24B",
        "formula": "#E8D9A8", "blue": "#4F9DE0"}
@@ -462,6 +470,96 @@ def _afterhours_html(tickers, demo):
               'institutional intent from anonymous order flow.</div>'}
 
 
+# ------------------------------------------------------- afterhours feed ---
+# JSON-native counterpart to _afterhours_html above: a flat, ticker-tagged
+# array of filing rows in the exact shape the MeridianFeed.jsx / News-First
+# terminal component consumes — {ticker, form, note, bias, items, impact,
+# session, accepted, url, source, buy_usd, sell_usd, title}. Powers the
+# sticky-filter / badge-coded feed instead of the pre-rendered HTML cards
+# above; both read from the same edgar.recent_filings() data.
+def _demo_feed_rows():
+    """A dozen illustrative rows so the feed renders something real-looking
+    without hitting SEC EDGAR — clearly a fixture, never live data."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+
+    def ago(mins):
+        return (now - timedelta(minutes=mins)).isoformat().replace("+00:00", "Z")
+
+    return [
+        {"ticker": "NVDA", "form": "4", "bias": 1, "buy_usd": 8_400_000, "sell_usd": 0,
+         "title": "Chief Executive Officer", "note": "insider buy (Form 4) — Chief Executive Officer $8.4M",
+         "accepted": ago(42), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "PLTR", "form": "8-K", "bias": 0, "items": ["5.02"], "impact": "high", "session": "pre_market",
+         "volatility_multiplier": 1.6, "gap_multiplier": 1.5,
+         "note": "material event (8-K) — exec/director change",
+         "accepted": ago(58), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001321655",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "SOFI", "form": "424B5", "bias": -1, "note": "securities offering — dilution",
+         "accepted": ago(75), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001818874",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "AMD", "form": "4", "bias": -1, "buy_usd": 0, "sell_usd": 1_150_000,
+         "title": "Director", "note": "insider sell (Form 4) — Director $1.2M",
+         "accepted": ago(103), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000002488",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "COIN", "form": "8-K", "bias": 0, "items": ["2.02", "9.01"], "impact": "high", "session": "after_hours",
+         "volatility_multiplier": 1.6, "gap_multiplier": 1.2,
+         "note": "material event (8-K)",
+         "accepted": ago(140), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001679788",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "HOOD", "form": "4", "bias": -1, "buy_usd": 0, "sell_usd": 6_900_000,
+         "title": "Chief Financial Officer", "note": "insider sell (Form 4) — Chief Financial Officer $6.9M",
+         "accepted": ago(171), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001783879",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "MARA", "form": "8-K", "bias": 0, "items": ["1.01"], "impact": "high", "session": "regular",
+         "volatility_multiplier": 1.6, "gap_multiplier": 1.0,
+         "note": "material event (8-K)",
+         "accepted": ago(205), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001507605",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "UPST", "form": "S-3", "bias": -1, "note": "shelf registration — potential dilution",
+         "accepted": ago(240), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001647639",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "META", "form": "4", "bias": 1, "buy_usd": 410_000, "sell_usd": 0,
+         "title": "Director", "note": "insider buy (Form 4) — Director $0.4M",
+         "accepted": ago(266), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001326801",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "AAPL", "form": "8-K", "bias": 0, "items": ["7.01"], "impact": "low", "session": "regular",
+         "volatility_multiplier": 1.0, "gap_multiplier": 1.0,
+         "note": "material event (8-K)",
+         "accepted": ago(301), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000320193",
+         "source": "SEC EDGAR [DEMO]"},
+    ]
+
+
+def _feed_rows(tickers, demo):
+    """Flat, ticker-tagged filing rows across `tickers`, newest first — the
+    payload for /api/feed. Each single ticker's fetch is independent, so one
+    bad symbol or a transient SEC hiccup drops that ticker's rows, never the
+    whole feed. Every row (demo included) carries `signal_score`
+    (edgar.signal_score) — bias scaled by the reporting person's role weight
+    for Form 4 (CEO/CFO 2.0x, other officer/10%+ owner 1.5x, director 1.0x),
+    or by the item/session volatility multiplier for 8-K — so the frontend
+    can sort/rank the feed by conviction, not just chronologically."""
+    if demo:
+        rows = _demo_feed_rows()
+    else:
+        rows = []
+
+        def one(t):
+            for f in _try(lambda: edgar.recent_filings(t, days=2), []):
+                row = dict(f)
+                row["ticker"] = t
+                row.setdefault("source", "SEC EDGAR")
+                rows.append(row)
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(one, tickers))
+    for row in rows:
+        row["signal_score"] = _try(lambda r=row: edgar.signal_score(r), 0.0)
+    rows.sort(key=lambda r: r.get("accepted") or "", reverse=True)
+    return rows
+
+
 # ----------------------------------------------------------- morning brief ---
 def _morning_html(tickers, demo):
     akey, asec = os.environ.get("ALPACA_API_KEY"), os.environ.get("ALPACA_API_SECRET")
@@ -624,11 +722,37 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, body, ctype="application/json", status=200):
+    def _send(self, body, ctype="application/json", status=200, extra_headers=None):
         b = body.encode() if isinstance(body, str) else body
         self.send_response(status); self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(b))); self.end_headers()
+        self.send_header("Content-Length", str(len(b)))
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
         self.wfile.write(b)
+
+    def _cors_headers(self):
+        """CORS headers for /api/feed, or {} when MERIDIAN_CORS_ORIGIN is unset
+        (same-origin only — the default). Never echoes an arbitrary Origin
+        header back: only CORS_ORIGIN's own configured value (or "*") is sent,
+        so an unset/empty config can't be tricked into allowing anything."""
+        if not CORS_ORIGIN:
+            return {}
+        return {
+            "Access-Control-Allow-Origin": CORS_ORIGIN,
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Authorization, Content-Type",
+            "Vary": "Origin",
+        }
+
+    def do_OPTIONS(self):
+        # CORS preflight — sent by browsers before a cross-origin GET that
+        # carries an Authorization header. No auth required (browsers never
+        # attach credentials to the preflight itself); only /api/feed answers.
+        if urlparse(self.path).path != "/api/feed" or not CORS_ORIGIN:
+            return self._send(b"", "text/plain", status=404)
+        headers = dict(self._cors_headers()); headers["Access-Control-Max-Age"] = "600"
+        return self._send(b"", "text/plain", status=204, extra_headers=headers)
 
     def _authorized(self):
         hdr = self.headers.get("Authorization", "")
@@ -646,6 +770,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("WWW-Authenticate", 'Basic realm="Meridian"')
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body)))
+        # Cross-origin /api/feed callers still need CORS headers on a 401,
+        # or the browser reports an opaque CORS failure instead of a
+        # readable "authentication required" the caller can act on.
+        if urlparse(self.path).path == "/api/feed":
+            for k, v in self._cors_headers().items():
+                self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -669,6 +799,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(json.dumps(_watchlist(tks, demo)))
             if u.path == "/api/afterhours":
                 return self._send(json.dumps(_afterhours_html(tks, demo)))
+            if u.path == "/api/feed":
+                return self._send(json.dumps({"rows": _feed_rows(tks, demo)}),
+                                  extra_headers=self._cors_headers())
             if u.path == "/api/morning":
                 return self._send(json.dumps(_morning_html(tks, demo)))
             if u.path == "/api/news":
