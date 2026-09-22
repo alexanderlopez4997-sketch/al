@@ -1010,9 +1010,9 @@ async function go(){const t=$('tk').value.trim().toUpperCase()||'NVDA';
    +'<div class="card"><div id="chart"></div></div><div class="card report">'+a.report+'</div>'
    +'<div class="card"><details><summary style="cursor:pointer;color:var(--gold);font-weight:700;letter-spacing:1px;font-size:13px">RESEARCH — company overview · valuation · quality · ownership</summary>'
    +'<div style="margin-top:12px">'+(a.research_html||'')+'</div></details></div>';
-  drawChart(o.bars);
+  if(!o.error)drawChart(o.bars);
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
-function drawChart(bars){const el=$('chart');if(!el||!window.LightweightCharts)return;
+function drawChart(bars){const el=$('chart');if(!el||!window.LightweightCharts||!bars||!bars.length)return;
  chart=LightweightCharts.createChart(el,{autoSize:true,layout:{background:{color:'#10161F'},textColor:'#C9D6E2'},
    grid:{vertLines:{color:'#1b2532'},horzLines:{color:'#1b2532'}},rightPriceScale:{borderColor:'#232F3D'},
    timeScale:{borderColor:'#232F3D'},crosshair:{mode:0}});
