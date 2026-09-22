@@ -218,6 +218,7 @@ def _full_analyze(sym, demo, optimize=False):
         res["fund"] = _try(lambda: fe.fetch_fundamentals(sym, fkey, avk))
         sen = _try(lambda: se.news_sentiment(sym, fkey, avk))
         res["filings"] = _try(lambda: edgar.recent_filings(sym, days=3), [])
+        res["insider_form4"] = _try(lambda: edgar.form4_insider_bias(sym))
         res["research"] = _try(lambda: rs.fetch_company_research(sym, avk))
         res["primary_filings"] = _try(lambda: edgar.primary_filings(sym), {})
         if akey and asec:
@@ -302,6 +303,18 @@ def _afterhours_html(tickers, demo):
     with ThreadPoolExecutor(max_workers=8) as ex:
         list(ex.map(one, tickers))
     flagged = sorted([r for r in reads.values() if r["flag"]], key=lambda r: -abs(r.get("ah_chg") or 0))
+    if not demo:
+        # EDGAR Form 4 insider bias (parsed XML) for flagged names only.
+        def _ins(r):
+            r["insider_form4"] = _try(lambda: edgar.form4_insider_bias(r["ticker"]))
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            list(ex.map(_ins, flagged))
+    def _8k_tag(f):
+        if f.get("form") != "8-K" or not f.get("items"):
+            return ""
+        return (f' · Item {", ".join(f["items"])} · {f.get("impact", "low")}-impact'
+                f' · gap ×{f.get("gap_multiplier", 1.0):.1f}')
+
     rows = ""
     for r in flagged:
         offer = next((f for f in r["filings"] if f["form"] in edgar.DILUTIVE_FORMS and f["bias"] < 0), None)
@@ -311,10 +324,13 @@ def _afterhours_html(tickers, demo):
         px = (f'<b style="color:{"#FF5449" if r["ah_chg"]<0 else "#2ECC8F"}">{r["ah_chg"]:+.1f}%</b> '
               f'→ {r["ah_price"]:.2f} vs {r["reg_close"]:.2f}' if r.get("ah_price") else "—")
         fil = "".join(f'<div class="sub">📂 {f["form"]} — {f["note"]}'
-                      f'{" · ⏰ after-hours" if f["after_hours"] else ""} '
+                      f'{" · ⏰ after-hours" if f["after_hours"] else ""}{_8k_tag(f)} '
                       f'<a href="{f["url"]}" target="_blank">open</a></div>' for f in r["filings"][:3])
+        ib = r.get("insider_form4")
+        insider_html = (f'<div class="sub">🧑‍💼 Insider (EDGAR Form 4): {_html.escape(ib["detail"])}</div>'
+                        if ib else "")
         rows += (f'<div class="ohcard"><div class="ohh"><b>{r["ticker"]}</b>'
-                 f'<span class="tagpill">{head}</span></div><div>{px}</div>{fil}</div>')
+                 f'<span class="tagpill">{head}</span></div><div>{px}</div>{fil}{insider_html}</div>')
     if not rows:
         rows = '<div class="muted">Nothing moving after hours and no fresh material filings.</div>'
     return {"html": f'<div class="grid3">{rows}</div>'
@@ -341,6 +357,8 @@ def _morning_html(tickers, demo):
         ahpx = qe.alpaca_latest_trade(t, akey, asec) if (akey and asec and not demo) else None
         ahchg = (ahpx / reg - 1) * 100 if ahpx else 0.0
         ins = None if demo else qe.insider_signal(_try(lambda: qe.finnhub_insiders(t, fkey)))
+        if ins is None and not demo:
+            ins = _try(lambda: edgar.form4_insider_bias(t))
         fil = [] if demo else _try(lambda: edgar.recent_filings(t, days=2), [])
         sen = None if demo else _try(lambda: se.news_sentiment(t, fkey, avk))
         b = mb.catalyst_score(r["score"], ahchg, ins, fil, sen, r.get("whale_activity"))
