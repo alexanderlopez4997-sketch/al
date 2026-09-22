@@ -28,9 +28,6 @@ import pandas as pd
 from datetime import datetime
 from adaptive_engine import (
     AdaptiveFactorEngine,
-    VolatilityAdaptiveNormalizer,
-    SubFactorAlignmentFilter,
-    WhaleFootprintGate,
     WalkForwardOptimizer,
 )
 
@@ -309,7 +306,7 @@ def example_full_pipeline(ticker, df, interval="1d"):
     """
     from quant_engine import (
         enrich, factor_matrix, detect_regime, information_ratio,
-        annualized_vol, atr_14, positions
+        atr_14, positions
     )
 
     # Stage 1: Enrich data with indicators

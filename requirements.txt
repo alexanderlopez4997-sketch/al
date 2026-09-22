@@ -4,6 +4,7 @@ numpy
 pandas
 requests
 yfinance
+numba
 # Only needed for the Textual TUI (tui_dashboard.py) and the full test suite;
 # the web dashboard (web_server.py) does not import it.
 textual

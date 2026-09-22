@@ -27,8 +27,6 @@ rank_universe with prefetched data) or from the shell:
 import argparse
 import datetime as _dt
 import json
-import math
-import sys
 
 import numpy as np
 import pandas as pd

@@ -31,9 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple, List, Dict, Any
 import numpy as np
 import pandas as pd
-import math
 from numba import njit
-import warnings
 
 __all__ = [
     'BacktestConfig',

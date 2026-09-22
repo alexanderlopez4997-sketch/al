@@ -30,18 +30,15 @@ USAGE:
   opt_result = optimize_weights_robust(F, close_prices, num_trials=500)
 """
 
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any
 import numpy as np
 import pandas as pd
-import warnings
-from dataclasses import asdict
 from backtesting_fidelity import (
     BacktestEngine,
     BacktestConfig,
     BacktestResult,
     PurgedKFold,
     DeflatedSharpe,
-    FeatureNormalizer,
 )
 
 __all__ = [

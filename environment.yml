@@ -11,3 +11,4 @@ dependencies:
     - yfinance
     - finnhub-python
     - textual
+    - numba
