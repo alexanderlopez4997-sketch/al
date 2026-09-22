@@ -398,6 +398,30 @@ check("_8k_impact low/neutral on empty items", edgar._8k_impact([]) == ("low", 1
 check("_8k_impact high wins when mixed", edgar._8k_impact(["7.01", "1.01"])[0] == "high")
 check("_8k_impact unknown item code doesn't crash", edgar._8k_impact(["99.99"]) == ("low", 1.0))
 
+# audit: HIGH_IMPACT_8K_ITEMS must be a strict superset of EXEC_ITEMS's keys
+# — every item EXEC_ITEMS tags in `note` as a "biggest gap" driver (exec
+# change, bankruptcy, M&A, delisting) must ALSO score high-impact/high-
+# volatility, or the note text and the risk weight silently contradict each
+# other (this was a real bug: 1.03/2.01/3.01 were tagged in note but scored
+# low-impact until HIGH_IMPACT_8K_ITEMS was derived from EXEC_ITEMS's keys).
+check("every EXEC_ITEMS code is high-impact", set(edgar.EXEC_ITEMS) <= edgar.HIGH_IMPACT_8K_ITEMS)
+check("_8k_impact high on 1.03 (bankruptcy)", edgar._8k_impact(["1.03"]) == ("high", 1.6))
+check("_8k_impact high on 2.01 (acquisition/disposition)", edgar._8k_impact(["2.01"]) == ("high", 1.6))
+check("_8k_impact high on 3.01 (delisting notice)", edgar._8k_impact(["3.01"]) == ("high", 1.6))
+check("_8k_impact high on 2.02 (earnings)", edgar._8k_impact(["2.02"]) == ("high", 1.6))
+check("_8k_impact high on 4.02 (non-reliance/restatement)", edgar._8k_impact(["4.02"]) == ("high", 1.6))
+
+# end-to-end through recent_filings()'s parsing path: item extraction from
+# SEC's raw comma-joined "items" string, note tagging, and impact/volatility
+# stay consistent for a bankruptcy 8-K specifically (the item this bug hid)
+_bankruptcy_items = [it.strip() for it in "1.03,9.01".split(",") if it.strip()]
+check("bankruptcy item code parses out of a raw SEC items string",
+      _bankruptcy_items == ["1.03", "9.01"])
+_bankruptcy_tag = next((edgar.EXEC_ITEMS[c] for c in _bankruptcy_items if c in edgar.EXEC_ITEMS), None)
+_bankruptcy_impact, _bankruptcy_mult = edgar._8k_impact(_bankruptcy_items)
+check("bankruptcy 8-K gets the bankruptcy note tag", _bankruptcy_tag == "bankruptcy")
+check("bankruptcy 8-K is scored high-impact, not low", _bankruptcy_impact == "high" and _bankruptcy_mult == 1.6)
+
 # Form 4 XML parsing: P (open-market buy, CEO) and S (10b5-1 plan sale) count;
 # A (grant) is dropped
 _FORM4_XML = """<?xml version="1.0"?>

@@ -286,12 +286,21 @@ def _session(iso):
 SESSION_GAP_MULTIPLIER = {"pre_market": 1.5, "after_hours": 1.2, "regular": 1.0, "overnight": 1.1}
 
 # 8-K Item codes whose disclosures historically carry the most next-session
-# volatility: entry into a material agreement, results of operations,
-# non-reliance on previously issued financials (restatement), and officer/
-# director changes. Everything else (general corporate items, Reg FD, etc.)
-# gets the low multiplier. An Item code this dict has never heard of still
-# resolves safely to "low" — no KeyError, no crash.
-HIGH_IMPACT_8K_ITEMS = {"1.01", "2.02", "4.02", "5.02"}
+# volatility: entry into a material agreement (1.01), results of operations
+# (2.02), non-reliance on previously issued financials/restatement (4.02),
+# and officer/director changes (5.02) — plus every code EXEC_ITEMS above
+# already tags as a "biggest gap" driver (bankruptcy, M&A, delisting), via
+# the set union below. That union matters: EXEC_ITEMS and this set used to
+# be maintained independently, and drifted apart — a bankruptcy (1.03), M&A
+# (2.01), or delisting (3.01) 8-K got its `note` correctly labeled but was
+# silently scored low-impact/low-volatility, exactly backwards for events
+# EXEC_ITEMS's own comment names as top gap drivers. Deriving this set from
+# EXEC_ITEMS's keys means that class of bug can't recur: tag a new item
+# there and it's automatically high-impact here too. Everything else
+# (general corporate items, Reg FD, exhibits) gets the low multiplier; an
+# Item code neither table has ever heard of still resolves safely to "low"
+# — no KeyError, no crash.
+HIGH_IMPACT_8K_ITEMS = {"1.01", "2.02", "4.02", "5.02"} | set(EXEC_ITEMS)
 ITEM_VOLATILITY_MULTIPLIER = {"high": 1.6, "low": 1.0}
 
 
