@@ -267,9 +267,13 @@ def recent_filings(ticker, days=4, timeout=15):
     reflects real insider sentiment (open-market buy = bullish, sell =
     bearish) rather than just "a Form 4 was filed"; a flood of buying
     insiders or multiple C-suite officers selling at once is called out in
-    `note` (_flag_insider_flood). For a role-weighted, 10b5-1-discounted
-    AGGREGATE across a rolling 24-72h window with exponential time decay
-    (rather than one filing's own transactions), see form4_insider_bias().
+    `note` (_flag_insider_flood). Each Form 4 entry also carries `buy_usd`,
+    `sell_usd`, `title` (reporting person's role) and `owner_name` as plain
+    fields — not just baked into `note` — for callers (e.g. a UI badge) that
+    want the structured amount rather than a parsed string. For a
+    role-weighted, 10b5-1-discounted AGGREGATE across a rolling 24-72h
+    window with exponential time decay (rather than one filing's own
+    transactions), see form4_insider_bias().
 
     8-K entries get both a precise per-Item volatility multiplier
     (`volatility_multiplier`, from the exact Item codes) and a session-based
@@ -305,6 +309,8 @@ def recent_filings(ticker, days=4, timeout=15):
             detail = _parse_form4(url, timeout)
             if detail:
                 owner, csuite = detail["owner"], detail["is_csuite"]
+                extra = {"buy_usd": detail["buy_usd"], "sell_usd": detail["sell_usd"],
+                         "title": detail["title"], "owner_name": detail["owner"]}
                 if detail["buy_usd"] != detail["sell_usd"] and (detail["buy_usd"] or detail["sell_usd"]):
                     bias = 1 if detail["buy_usd"] > detail["sell_usd"] else -1
                     usd = detail["buy_usd"] if bias > 0 else detail["sell_usd"]

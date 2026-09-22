@@ -338,6 +338,85 @@ def _afterhours_html(tickers, demo):
               'that cause moves. It does not infer institutional intent from order flow.</div>'}
 
 
+# ------------------------------------------------------- afterhours feed ---
+# JSON-native counterpart to _afterhours_html above: a flat, ticker-tagged
+# array of filing rows in the exact shape the MeridianFeed.jsx / News-First
+# terminal component consumes — {ticker, form, note, bias, items, impact,
+# session, accepted, url, source, buy_usd, sell_usd, title}. Powers the
+# sticky-filter / badge-coded feed instead of the pre-rendered HTML cards
+# above; both read from the same edgar.recent_filings() data.
+def _demo_feed_rows():
+    """A dozen illustrative rows so the feed renders something real-looking
+    without hitting SEC EDGAR — clearly a fixture, never live data."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+
+    def ago(mins):
+        return (now - timedelta(minutes=mins)).isoformat().replace("+00:00", "Z")
+
+    return [
+        {"ticker": "NVDA", "form": "4", "bias": 1, "buy_usd": 8_400_000, "sell_usd": 0,
+         "title": "Chief Executive Officer", "note": "insider buy (Form 4) — Chief Executive Officer $8.4M",
+         "accepted": ago(42), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "PLTR", "form": "8-K", "bias": 0, "items": ["5.02"], "impact": "high", "session": "pre_market",
+         "note": "material event (8-K) — exec/director change",
+         "accepted": ago(58), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001321655",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "SOFI", "form": "424B5", "bias": -1, "note": "securities offering — dilution",
+         "accepted": ago(75), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001818874",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "AMD", "form": "4", "bias": -1, "buy_usd": 0, "sell_usd": 1_150_000,
+         "title": "Director", "note": "insider sell (Form 4) — Director $1.2M",
+         "accepted": ago(103), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000002488",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "COIN", "form": "8-K", "bias": 0, "items": ["2.02", "9.01"], "impact": "high", "session": "after_hours",
+         "note": "material event (8-K)",
+         "accepted": ago(140), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001679788",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "HOOD", "form": "4", "bias": -1, "buy_usd": 0, "sell_usd": 6_900_000,
+         "title": "Chief Financial Officer", "note": "insider sell (Form 4) — Chief Financial Officer $6.9M",
+         "accepted": ago(171), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001783879",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "MARA", "form": "8-K", "bias": 0, "items": ["1.01"], "impact": "high", "session": "regular",
+         "note": "material event (8-K)",
+         "accepted": ago(205), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001507605",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "UPST", "form": "S-3", "bias": -1, "note": "shelf registration — potential dilution",
+         "accepted": ago(240), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001647639",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "META", "form": "4", "bias": 1, "buy_usd": 410_000, "sell_usd": 0,
+         "title": "Director", "note": "insider buy (Form 4) — Director $0.4M",
+         "accepted": ago(266), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001326801",
+         "source": "SEC EDGAR [DEMO]"},
+        {"ticker": "AAPL", "form": "8-K", "bias": 0, "items": ["7.01"], "impact": "low", "session": "regular",
+         "note": "material event (8-K)",
+         "accepted": ago(301), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000320193",
+         "source": "SEC EDGAR [DEMO]"},
+    ]
+
+
+def _feed_rows(tickers, demo):
+    """Flat, ticker-tagged filing rows across `tickers`, newest first — the
+    payload for /api/feed. Each single ticker's fetch is independent, so one
+    bad symbol or a transient SEC hiccup drops that ticker's rows, never the
+    whole feed."""
+    if demo:
+        return _demo_feed_rows()
+    rows = []
+
+    def one(t):
+        for f in _try(lambda: edgar.recent_filings(t, days=2), []):
+            row = dict(f)
+            row["ticker"] = t
+            row.setdefault("source", "SEC EDGAR")
+            rows.append(row)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(one, tickers))
+    rows.sort(key=lambda r: r.get("accepted") or "", reverse=True)
+    return rows
+
+
 # ----------------------------------------------------------- morning brief ---
 def _morning_html(tickers, demo):
     akey, asec = os.environ.get("ALPACA_API_KEY"), os.environ.get("ALPACA_API_SECRET")
@@ -545,6 +624,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(json.dumps(_watchlist(tks, demo)))
             if u.path == "/api/afterhours":
                 return self._send(json.dumps(_afterhours_html(tks, demo)))
+            if u.path == "/api/feed":
+                return self._send(json.dumps({"rows": _feed_rows(tks, demo)}))
             if u.path == "/api/morning":
                 return self._send(json.dumps(_morning_html(tks, demo)))
             if u.path == "/api/news":
