@@ -45,7 +45,6 @@ import sentiment_engine as se
 import edgar
 import research as rs
 import orderflow as of
-import afterhours as ah
 import morning as mb
 import trackrecord as tr
 import websocket_client_v2 as wsc
@@ -281,61 +280,185 @@ def _watchlist(tickers, demo):
 
 
 # ------------------------------------------------------------- afterhours ---
+def _fmt_usd_k(x):
+    """1234567 -> '$1.2M'; 999000 -> '$999K'; 4200000000 -> '$4.2B'. None-safe."""
+    if x is None:
+        return "—"
+    a = abs(x)
+    if a >= 1e9:
+        return f"${a/1e9:.1f}B"
+    if a >= 1e7:
+        return f"${a/1e6:.0f}M"
+    if a >= 1e6:
+        return f"${a/1e6:.1f}M"
+    if a >= 1e3:
+        return f"${a/1e3:.0f}K"
+    return f"${a:.0f}"
+
+
+def _et_ts(iso):
+    """ISO8601 UTC -> short Eastern-time label, e.g. 'Sep 22, 05:40 PM ET'.
+    Falls back to the raw date (first 10 chars) or '—' on any parse failure —
+    a malformed timestamp should never break the row, just show less of it."""
+    if not iso:
+        return "—"
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        dt_ = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(ZoneInfo("America/New_York"))
+        return dt_.strftime("%b %d, %I:%M %p ET")
+    except Exception:
+        return iso[:10] if len(iso) >= 10 else "—"
+
+
+# 8-K Item codes that are pure Reg FD / exhibit housekeeping rather than a
+# substantive disclosure — badged blue (informational) instead of amber/red.
+_REG_FD_ITEMS = {"7.01", "9.01"}
+
+
+def _classify_filing(f):
+    """Non-Form-4 filing -> (filter category, badge label, badge CSS class)."""
+    form = f["form"]
+    if form in edgar.DILUTIVE_FORMS:
+        return "dilution", "DILUTION", "dilution"
+    if form == "8-K":
+        items = f.get("items") or []
+        label = f"Item {items[0]}" if items else "8-K"
+        if any(it in _REG_FD_ITEMS for it in items):
+            return "8k", label, "k8-reg"
+        return ("8k", label, "k8-high") if f.get("impact") == "high" else ("8k", label, "k8-low")
+    if form.startswith("SC 13D"):
+        return "other", "13D STAKE", "buy"
+    return "other", form, "other"
+
+
+def _classify_insider_tx(usd, is_buy):
+    """Open-market Form 4 transaction -> (filter category, badge label, badge CSS class).
+    Thresholds: buys are always green; sells are red >=$5M (high-dollar), muted
+    gray <$500K (routine — tax-plan-sized trades that aren't a conviction signal),
+    amber in between."""
+    if is_buy:
+        return "buy", f"BUY {_fmt_usd_k(usd)}", "buy"
+    if usd >= 5_000_000:
+        return "sell", f"SELL {_fmt_usd_k(usd)}", "sell-big"
+    if usd < 500_000:
+        return "sell", f"sell {_fmt_usd_k(usd)}", "sell-small"
+    return "sell", f"SELL {_fmt_usd_k(usd)}", "sell-mid"
+
+
+def _filing_event(ticker, f):
+    cat, badge, cls = _classify_filing(f)
+    ts = f.get("accepted") or f.get("date") or ""
+    return {"ticker": ticker, "cat": cat, "badge": badge, "badge_cls": cls,
+            "desc": _html.escape(f["note"]), "url": f["url"], "ts_iso": ts, "ts_label": _et_ts(ts)}
+
+
+def _insider_tx_event(ticker, tx):
+    is_buy = tx["code"] == "P"
+    cat, badge, cls = _classify_insider_tx(tx["usd"], is_buy)
+    title = _html.escape(tx.get("title") or "Insider")
+    owner = _html.escape(tx.get("owner") or "")
+    verb = "bought" if is_buy else "sold"
+    plan = " · 10b5-1 plan" if tx.get("is_10b5_1") else ""
+    who = f"{owner} ({title})" if owner else title
+    desc = f'{who} {verb} <span class="ev-amt">{_fmt_usd_k(tx["usd"])}</span> in open-market trading{plan}'
+    ts = tx.get("accepted") or tx.get("date") or ""
+    return {"ticker": ticker, "cat": cat, "badge": badge, "badge_cls": cls,
+            "desc": desc, "url": tx.get("url", "#"), "ts_iso": ts, "ts_label": _et_ts(ts)}
+
+
+def _demo_afterhours_events():
+    """Synthetic events spanning every badge type so the news-first layout is
+    visible without live SEC/market access — every row says (demo); never
+    presented as a real disclosure."""
+    return [
+        {"ticker": "NVDA", "cat": "buy", "badge": "BUY $999K", "badge_cls": "buy",
+         "desc": 'CFO (demo) bought <span class="ev-amt">$999K</span> in open-market trading',
+         "url": "#", "ts_iso": "9999-01-04", "ts_label": "just now (demo)"},
+        {"ticker": "AMD", "cat": "sell", "badge": "SELL $48M", "badge_cls": "sell-big",
+         "desc": 'CEO (demo) sold <span class="ev-amt">$48.0M</span> in open-market trading · 10b5-1 plan',
+         "url": "#", "ts_iso": "9999-01-03", "ts_label": "2h ago (demo)"},
+        {"ticker": "ADBE", "cat": "sell", "badge": "sell $210K", "badge_cls": "sell-small",
+         "desc": 'Director (demo) sold <span class="ev-amt">$210K</span> — routine, below the $500K threshold',
+         "url": "#", "ts_iso": "9999-01-02", "ts_label": "5h ago (demo)"},
+        {"ticker": "PEP", "cat": "8k", "badge": "Item 5.02", "badge_cls": "k8-high",
+         "desc": "material event (8-K) — exec/director change (demo)",
+         "url": "#", "ts_iso": "9999-01-01", "ts_label": "yesterday (demo)"},
+        {"ticker": "MSFT", "cat": "8k", "badge": "Item 9.01", "badge_cls": "k8-reg",
+         "desc": "material event (8-K) — Reg FD / exhibits only (demo)",
+         "url": "#", "ts_iso": "9998-12-31", "ts_label": "yesterday (demo)"},
+        {"ticker": "SOFI", "cat": "dilution", "badge": "DILUTION", "badge_cls": "dilution",
+         "desc": "securities offering — dilution (S-3) (demo)",
+         "url": "#", "ts_iso": "9998-12-30", "ts_label": "2d ago (demo)"},
+    ]
+
+
 def _afterhours_html(tickers, demo):
-    akey, asec = os.environ.get("ALPACA_API_KEY"), os.environ.get("ALPACA_API_SECRET")
-    data = ({t: qe.demo_data(t) for t in tickers} if demo
-            else g.fetch_many_concurrent(tickers, "6mo", "1d"))
-    reads = {}
+    """News-first EDGAR feed: one row per disclosed event (insider trade, 8-K,
+    offering/dilution), newest first, with a sticky category filter bar —
+    replaces the old one-card-per-ticker layout so the filings ARE the page,
+    not a footnote under a price move."""
+    if demo:
+        events = _demo_afterhours_events()
+    else:
+        data = g.fetch_many_concurrent(tickers, "6mo", "1d")
+        reads = {}
 
-    def one(t):
-        df = data.get(t)
-        if df is None or len(df) < 2:
-            return
-        reg, prev = float(df["Close"].iloc[-1]), float(df["Close"].iloc[-2])
-        ahpx = qe.alpaca_latest_trade(t, akey, asec) if (akey and asec) else None
-        r = (ah.read_one(t, reg, prev, ahpx) if ahpx else
-             {"ticker": t, "reg_close": reg, "ah_price": None, "ah_chg": 0.0, "flag": False})
-        r["filings"] = [] if demo else _try(lambda: edgar.recent_filings(t, days=2), [])
-        r["whale"] = qe.whale_score(df)
-        if r["filings"]:
-            r["flag"] = True
-        reads[t] = r
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        list(ex.map(one, tickers))
-    flagged = sorted([r for r in reads.values() if r["flag"]], key=lambda r: -abs(r.get("ah_chg") or 0))
-    if not demo:
-        # EDGAR Form 4 insider bias (parsed XML) for flagged names only.
-        def _ins(r):
-            r["insider_form4"] = _try(lambda: edgar.form4_insider_bias(r["ticker"]))
+        def one(t):
+            df = data.get(t)
+            if df is None or len(df) < 2:
+                return
+            reads[t] = {"filings": _try(lambda: edgar.recent_filings(t, days=2), [])}
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(one, tickers))
+
+        def _ins(t):
+            reads[t]["insider_form4"] = _try(lambda: edgar.form4_insider_bias(t))
         with ThreadPoolExecutor(max_workers=5) as ex:
-            list(ex.map(_ins, flagged))
-    def _8k_tag(f):
-        if f.get("form") != "8-K" or not f.get("items"):
-            return ""
-        return (f' · Item {", ".join(f["items"])} · {f.get("impact", "low")}-impact'
-                f' · gap ×{f.get("gap_multiplier", 1.0):.1f}')
+            list(ex.map(_ins, list(reads.keys())))
 
-    rows = ""
-    for r in flagged:
-        offer = next((f for f in r["filings"] if f["form"] in edgar.DILUTIVE_FORMS and f["bias"] < 0), None)
-        neg = next((f for f in r["filings"] if f["bias"] < 0), None)
-        head = ("⚠ DILUTION/OFFERING" if offer else "⚠ INSIDER SELLING" if neg else
-                "🔔 MATERIAL FILING" if r["filings"] else "🌙 AH MOVE")
-        px = (f'<b style="color:{"#FF5449" if r["ah_chg"]<0 else "#2ECC8F"}">{r["ah_chg"]:+.1f}%</b> '
-              f'→ {r["ah_price"]:.2f} vs {r["reg_close"]:.2f}' if r.get("ah_price") else "—")
-        fil = "".join(f'<div class="sub">📂 {f["form"]} — {f["note"]}'
-                      f'{" · ⏰ after-hours" if f["after_hours"] else ""}{_8k_tag(f)} '
-                      f'<a href="{f["url"]}" target="_blank">open</a></div>' for f in r["filings"][:3])
-        ib = r.get("insider_form4")
-        insider_html = (f'<div class="sub">🧑‍💼 Insider (EDGAR Form 4): {_html.escape(ib["detail"])}</div>'
-                        if ib else "")
-        rows += (f'<div class="ohcard"><div class="ohh"><b>{r["ticker"]}</b>'
-                 f'<span class="tagpill">{head}</span></div><div>{px}</div>{fil}{insider_html}</div>')
-    if not rows:
-        rows = '<div class="muted">Nothing moving after hours and no fresh material filings.</div>'
-    return {"html": f'<div class="grid3">{rows}</div>'
-            + '<div class="muted" style="margin-top:14px">Reports the after-hours move + the SEC filings '
-              'that cause moves. It does not infer institutional intent from order flow.</div>'}
+        events = []
+        for t, r in reads.items():
+            for f in r["filings"]:
+                if f["form"] == "4":
+                    continue  # superseded by the per-transaction rows below
+                events.append(_filing_event(t, f))
+            ib = r.get("insider_form4")
+            for tx in (ib["transactions"] if ib else []):
+                events.append(_insider_tx_event(t, tx))
+        events.sort(key=lambda e: e["ts_iso"], reverse=True)
+
+    status = (f'<span class="dot"></span>{len(events)} event{"s" if len(events) != 1 else ""}'
+              if events else '<span class="dot"></span>No fresh filings or insider activity')
+    bar = ('<div class="newsbar">'
+           '<button class="filt active" onclick="newsFilter(\'all\',this)">ALL</button>'
+           '<button class="filt" onclick="newsFilter(\'buy\',this)">INSIDER BUYS</button>'
+           '<button class="filt" onclick="newsFilter(\'sell\',this)">INSIDER SELLS</button>'
+           '<button class="filt" onclick="newsFilter(\'8k\',this)">MATERIAL 8-K</button>'
+           '<button class="filt" onclick="newsFilter(\'dilution\',this)">OFFERINGS/DILUTION</button>'
+           '<button class="filt" onclick="newsFilter(\'watchlist\',this)" '
+           'title="This feed is already scoped to your current watchlist.">WATCHLIST ONLY</button>'
+           f'<span class="newstatus">{status}</span></div>')
+
+    if events:
+        body = "".join(
+            f'<tr data-cat="{e["cat"]} watchlist">'
+            f'<td class="ev-tkr">{_html.escape(e["ticker"])}</td>'
+            f'<td><span class="ev-badge {e["badge_cls"]}">{_html.escape(e["badge"])}</span></td>'
+            f'<td>{e["desc"]}</td>'
+            f'<td class="ev-src"><a href="{e["url"]}" target="_blank">open</a></td>'
+            f'<td class="ev-ts">{e["ts_label"]}</td></tr>'
+            for e in events)
+    else:
+        body = '<tr><td colspan="5" class="muted">No fresh filings or insider activity in the last 2 days.</td></tr>'
+
+    table = (f'<table class="newstable"><thead><tr>'
+             f'<th>Ticker</th><th>Event</th><th>Description</th><th>Source</th><th>Time</th>'
+             f'</tr></thead><tbody>{body}</tbody></table>')
+    return {"html": bar + table
+            + '<div class="muted" style="margin-top:14px">Reports the SEC filings that cause moves — '
+              'insider Form 4 trades, material 8-Ks, and dilutive offerings. It does not infer '
+              'institutional intent from anonymous order flow.</div>'}
 
 
 # ----------------------------------------------------------- morning brief ---
@@ -698,7 +821,7 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
  :root{--bg:#0A0E15;--panel:#10161F;--panel2:#161F2B;--line:#232F3D;--txt:#C9D6E2;--dim:#6B7E92;
-   --gold:#C8A24B;--buy:#2ECC8F;--sell:#FF5449;--amber:#E0A83B}
+   --gold:#C8A24B;--buy:#2ECC8F;--sell:#FF5449;--amber:#E0A83B;--blue:#4F9DE0;--purple:#B15CDE}
  *{box-sizing:border-box} html,body{margin:0;height:100%}
  body{background:var(--bg);color:var(--txt);font-family:-apple-system,"SF Pro Text",Inter,system-ui,sans-serif;
    font-size:14px;display:flex;flex-direction:column;height:100vh}
@@ -747,6 +870,39 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  .corr-row{display:flex;gap:8px;margin-bottom:4px}
  .corr-label{width:100px;color:var(--dim)}.corr-value{width:60px;text-align:right}
  .buffer-status{font-size:11px;color:var(--dim);margin-top:10px}
+
+ /* -------- news-first EDGAR feed (After-Hours tab) -------- */
+ .newsbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+   background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px}
+ .newsbar .filt{background:var(--panel);color:var(--dim);border:1px solid var(--line);
+   padding:5px 12px;font-size:11px;font-weight:700;letter-spacing:.5px;border-radius:14px;cursor:pointer}
+ .newsbar .filt:hover{border-color:var(--gold)}
+ .newsbar .filt.active{background:var(--gold);color:#241a05;border-color:var(--gold)}
+ .newstatus{margin-left:auto;font-size:11px;color:var(--dim);display:flex;align-items:center;gap:5px;white-space:nowrap}
+ .newstatus .dot{width:7px;height:7px;border-radius:50%;background:var(--dim);display:inline-block}
+ .newstatus.err .dot{background:var(--sell)}
+ .newstable{width:100%;border-collapse:collapse;font-size:12px}
+ .newstable thead th{position:sticky;top:41px;background:var(--panel2);color:var(--dim);text-align:left;
+   font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:6px 8px;border-bottom:1px solid var(--line)}
+ .newstable tbody tr{border-bottom:1px solid var(--line)}
+ .newstable tbody tr:nth-child(even){background:rgba(255,255,255,.02)}
+ .newstable tbody tr:hover{background:rgba(200,162,75,.06)}
+ .newstable td{padding:5px 8px;vertical-align:top;line-height:1.4}
+ .ev-tkr{font-weight:800;font-family:ui-monospace,Menlo,monospace;color:var(--txt);white-space:nowrap}
+ .ev-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:800;
+   letter-spacing:.4px;white-space:nowrap}
+ .ev-badge.buy{background:#0f2f22;color:var(--buy)}
+ .ev-badge.sell-big{background:#2f1414;color:var(--sell)}
+ .ev-badge.sell-mid{background:#2f2710;color:var(--amber)}
+ .ev-badge.sell-small{background:var(--panel2);color:var(--dim)}
+ .ev-badge.k8-high{background:#2f2710;color:var(--amber)}
+ .ev-badge.k8-reg{background:#132538;color:var(--blue)}
+ .ev-badge.k8-low{background:var(--panel2);color:var(--dim)}
+ .ev-badge.dilution{background:#2a1233;color:var(--purple);border:1px solid var(--purple)}
+ .ev-badge.other{background:var(--panel2);color:var(--dim)}
+ .ev-src a{color:var(--blue);text-decoration:none}.ev-src a:hover{text-decoration:underline}
+ .ev-ts{color:var(--dim);white-space:nowrap;font-family:ui-monospace,monospace;font-size:11px}
+ .ev-amt{font-weight:800}
  ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
 </style></head><body>
 <div class="top"><span class="diamond">◆</span><div><div class="brand">MERIDIAN</div>
@@ -865,6 +1021,10 @@ async function load(url,name){$('main').innerHTML='<div class="loader">Loading '
  try{const d=await(await fetch(url+'?demo='+demo()+'&tickers='+wl())).json();
   $('main').innerHTML=d.error?'<div class="card" style="color:var(--sell)">'+d.error+'</div>':d.html;
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+function newsFilter(cat,btn){
+ document.querySelectorAll('.newsbar .filt').forEach(b=>b.classList.toggle('active',b===btn));
+ document.querySelectorAll('.newstable tbody tr').forEach(tr=>{
+  tr.style.display=(cat==='all'||tr.dataset.cat.split(' ').includes(cat))?'':'none';});}
 async function screen_(){$('main').innerHTML='<div class="loader">Screening…</div>';
  try{const d=await(await fetch('/api/screen?demo='+demo()+'&tickers='+wl())).json();
   if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}

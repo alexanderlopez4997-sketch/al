@@ -310,6 +310,7 @@ def recent_filings(ticker, days=4, timeout=15):
                     usd = detail["buy_usd"] if bias > 0 else detail["sell_usd"]
                     who = detail["title"] or "insider"
                     note = f"insider {'buy' if bias > 0 else 'sell'} (Form 4) — {who} ${usd/1e6:.1f}M"
+                    extra = {"usd": usd, "owner": owner, "title": detail["title"]}
         elif f == "8-K":
             try:
                 raw_items = items_col[i] if i < len(items_col) else ""
