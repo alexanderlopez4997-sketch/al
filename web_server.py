@@ -602,6 +602,8 @@ body{{margin:0;background:#0A0E15;color:#C9D6E2;font-family:system-ui;padding:20
                     html += '</div>'
                 html += '</body></html>'
                 return self._send(json.dumps({"html": html}))
+            if u.path == "/api/diagnostics":
+                return self._send(json.dumps(_diagnostics_json(tks)))
         except Exception as e:
             return self._send(json.dumps({"error": str(e)}))
         self._send("not found", "text/plain", status=404)
