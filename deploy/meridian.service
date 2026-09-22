@@ -20,10 +20,10 @@ ExecStart=/opt/meridian/.venv/bin/python web_server.py
 Restart=on-failure
 RestartSec=5
 
-# web_server.py binds 127.0.0.1:8787 (localhost only), so the dashboard is NOT
+# web_server.py binds 127.0.0.1:8788 (localhost only), so the dashboard is NOT
 # reachable from outside the box by default. Reach it via an SSH tunnel or put a
 # reverse proxy in front of it (see DEPLOY.md). The app has no authentication —
-# do not expose port 8787 to the public internet directly.
+# do not expose port 8788 to the public internet directly.
 
 # --- hardening (safe to keep; loosen only if something legitimately needs it) ---
 NoNewPrivileges=true

@@ -1108,7 +1108,6 @@ def build_formula_reference():
 
 def build_live_math_segments(res):
     """Plug THIS stock's live numbers into the key formulas."""
-    import numpy as np
     d = res["d"]; row = d.iloc[-1]
     close = float(row["Close"])
     sma20 = float(d["Close"].rolling(20).mean().iloc[-1])
@@ -1949,6 +1948,7 @@ class App:
                     "sentiment": lambda: se.news_sentiment(sym, fkey,
                                                            os.environ.get("ALPHA_VANTAGE_KEY")),
                     "filings": lambda: edgar.recent_filings(sym, days=3),
+                    "insider_form4": lambda: edgar.form4_insider_bias(sym),
                 }
                 akey, asec = alpaca_keys()
                 if akey and asec:                       # real dark-pool block flow (SIP)
@@ -1966,6 +1966,7 @@ class App:
                 res["fund"] = out.get("fund"); sentiment = out.get("sentiment")
                 res["orderflow"] = out.get("orderflow")
                 res["filings"] = out.get("filings")
+                res["insider_form4"] = out.get("insider_form4")
             res["sentiment"] = sentiment
             try:
                 macro = se.macro_signal(sentiment)
@@ -2365,7 +2366,12 @@ class App:
                 reg_close = float(df["Close"].iloc[-1])
                 ah_px = qe.alpaca_latest_trade(t, akey, asec) if (akey and asec) else None
                 ah_chg = (ah_px / reg_close - 1) * 100 if ah_px else 0.0
-                ins = qe.insider_signal(qe.finnhub_insiders(t, fkey))
+                ins = qe.insider_signal(qe.finnhub_insiders(t, fkey)) if fkey else None
+                if ins is None:
+                    try:
+                        ins = edgar.form4_insider_bias(t)
+                    except Exception:
+                        ins = None
                 fil = edgar.recent_filings(t, days=2)
                 sen = se.news_sentiment(t, fkey, avkey)
                 brief = mb.catalyst_score(res["score"], ah_chg, ins, fil,
@@ -2478,6 +2484,15 @@ class App:
                         pass
                 with ThreadPoolExecutor(max_workers=5) as ex:
                     list(ex.map(flow, [t for t, r in reads.items() if r["flag"]]))
+            # EDGAR Form 4 insider bias (parsed XML) for flagged names only —
+            # each name costs several SEC fetches, so skip the unflagged majority.
+            def insiders(t):
+                try:
+                    reads[t]["insider_form4"] = edgar.form4_insider_bias(t)
+                except Exception:
+                    reads[t]["insider_form4"] = None
+            with ThreadPoolExecutor(max_workers=5) as ex:
+                list(ex.map(insiders, [t for t, r in reads.items() if r["flag"]]))
             self._post(self._render_afterhours, reads)
         except Exception as exc:
             err_msg = str(exc)
@@ -2525,12 +2540,14 @@ class App:
         Every line is real/sourced — no fabricated 'institutional block prints'."""
         bar = "┌" + "─" * 56 + "┐\n"
         filings = r.get("filings") or []
-        offering = next((f for f in filings if f["bias"] < 0), None)
+        offering = next((f for f in filings if f["form"] in edgar.DILUTIVE_FORMS and f["bias"] < 0), None)
+        neg = next((f for f in filings if f["bias"] < 0), None)
         headline = (f"⚠ DILUTION/OFFERING" if offering else
+                    "⚠ INSIDER SELLING" if neg else
                     "🔔 MATERIAL FILING" if filings else "🌙 AFTER-HOURS MOVE")
         o.insert("end", bar, "dim")
         o.insert("end", f"  🔔 {r['ticker']}  ", "big")
-        o.insert("end", f"{headline}\n", "sell" if offering else "warn")
+        o.insert("end", f"{headline}\n", "sell" if (offering or neg) else "warn")
         # price line
         if r.get("ah_price"):
             tag = "sell" if r["ah_chg"] < 0 else "buy"
@@ -2540,9 +2557,18 @@ class App:
         # EDGAR filing line(s) — the disclosed cause
         for f in filings[:2]:
             ahtag = " · ⏰ after-hours" if f["after_hours"] else ""
-            o.insert("end", f"  📂 EDGAR {f['form']} — {f['note']}{ahtag}\n",
+            extra = ""
+            if f["form"] == "8-K" and f.get("items"):
+                extra = (f" · Item {', '.join(f['items'])} · {f.get('impact', 'low')}-impact"
+                         f" · gap ×{f.get('gap_multiplier', 1.0):.1f}")
+            o.insert("end", f"  📂 EDGAR {f['form']} — {f['note']}{ahtag}{extra}\n",
                      "sell" if f["bias"] < 0 else "buy" if f["bias"] > 0 else "txt")
             o.insert("end", f"     {f['url']}\n", "dim")
+        # EDGAR Form 4 insider bias (open-market P/S, role/decay-weighted)
+        ib = r.get("insider_form4")
+        if ib:
+            o.insert("end", f"  🧑‍💼 Insider (EDGAR Form 4): {ib['detail']}\n",
+                     "buy" if ib["signal"] > 0 else "sell" if ib["signal"] < 0 else "txt")
         # REAL dark-pool block flow from the FINRA TRF tape (Alpaca SIP)
         fl = r.get("orderflow")
         if fl and fl.get("n_blocks"):

@@ -20,8 +20,6 @@ Edge cases tested:
 
 import unittest
 from datetime import datetime, timedelta
-import numpy as np
-import pandas as pd
 from portfolio_risk_manager import (
     PortfolioRiskManager,
     DynamicCorrelationGate,
@@ -85,8 +83,9 @@ class TestDynamicCorrelationGate(unittest.TestCase):
         self.gate.register_ticker("MSFT", "Tech")
         now = datetime.now()
 
-        # Add data with gaps (simulating missing data)
-        for i in range(70):
+        # Add data with gaps (simulating missing data). Use 100 raw days so that
+        # after skipping ~1/3 of them, >= lookback_bars(60) rows still remain.
+        for i in range(100):
             if i % 3 == 0:  # Skip every 3rd day
                 continue
             self.gate.update_price("AAPL", 150.0 + i * 0.5, now + timedelta(days=i))
@@ -124,19 +123,20 @@ class TestDynamicCorrelationGate(unittest.TestCase):
             ),
         }
 
-        portfolio_equity = 100000
-        existing_exposure = (100 * 150 + 50 * 300) / portfolio_equity  # 0.75% + 0.15% = 0.90%
+        # A $10M book: existing Tech exposure is ($15k + $15k) / $10M = 0.3%
+        portfolio_equity = 10_000_000
+        existing_exposure = (100 * 150 + 50 * 300) / portfolio_equity  # 0.30%
 
-        # Try to add another large Tech position
+        # Try to add another Tech position
         result = self.gate.evaluate_position(
             ticker="NVDA",
-            proposed_shares=100,  # Would be 0.85% of portfolio
+            proposed_shares=100,  # Adds $85k = 0.85% of portfolio
             current_price=850.0,
             portfolio_equity=portfolio_equity,
             existing_positions=existing_positions,
         )
 
-        # Total Tech would be 0.90% + 0.85% = 1.75%, well under 3% limit
+        # Total Tech would be 0.30% + 0.85% = 1.15%, well under the 3% limit
         self.assertTrue(result.approved)
 
     def test_sector_exposure_hard_cap(self):
@@ -167,13 +167,14 @@ class TestDynamicCorrelationGate(unittest.TestCase):
             ),
         }
 
-        portfolio_equity = 100000
-        existing_exposure = (1000 * 150 + 500 * 300) / portfolio_equity  # 1.5% + 1.5% = 3.0%
+        # A $10M book: existing Tech exposure is already ($150k + $150k) / $10M = 3.0%, at the cap
+        portfolio_equity = 10_000_000
+        existing_exposure = (1000 * 150 + 500 * 300) / portfolio_equity  # 3.0%
 
-        # Try to add another Tech position (would exceed 3% cap)
+        # Try to add another Tech position (would exceed the 3% cap)
         result = self.gate.evaluate_position(
             ticker="NVDA",
-            proposed_shares=100,  # Would be 0.85%
+            proposed_shares=100,  # Adds $85k = 0.85% more
             current_price=850.0,
             portfolio_equity=portfolio_equity,
             existing_positions=existing_positions,
@@ -214,7 +215,9 @@ class TestDynamicCorrelationGate(unittest.TestCase):
             ticker="MSFT",
             proposed_shares=100,
             current_price=300.0,
-            portfolio_equity=100000,
+            # $10M book: existing + proposed Tech exposure is 0.45%, well under the
+            # 3% sector cap, so correlation is isolated as the sole limiting factor.
+            portfolio_equity=10_000_000,
             existing_positions=existing_positions,
         )
 
@@ -270,8 +273,13 @@ class TestAutomatedCircuitBreaker(unittest.TestCase):
         """Test weekly drawdown threshold trigger."""
         self.cb.initialize_session(100000)
         self.cb.weekly_open_equity = 100000
+        # Today's session opened already down for the week (95000); intraday_dd
+        # measures from here, so today's further move to 94900 is small (~-0.1%)
+        # while the cumulative weekly move (100000 -> 94900) is -5.1%, isolating
+        # the weekly trigger from the intraday one.
+        self.cb.session_start_equity = 95000
 
-        # Equity drops 5.1%
+        # Equity drops 5.1% for the week
         state, reason = self.cb.update(94900, self.start_time + timedelta(days=3))
 
         self.assertEqual(state, EngineState.CIRCUIT_BREAKER)
@@ -443,9 +451,10 @@ class TestTrailingStopManager(unittest.TestCase):
             timestamp=self.start_time + timedelta(hours=1),
         )
 
-        # Stop should widen due to vol spike
+        # Stop should widen (move further from price, i.e. lower) due to vol spike
         if new_stop is not None:
-            self.assertGreater(new_stop, 145.0)  # Widened from initial stop
+            self.assertLess(new_stop, 145.0)  # Widened from initial stop
+            self.assertEqual(reason, StopAdjustmentReason.VOLATILITY_SPIKE)
 
     def test_remove_position(self):
         """Test position removal."""
@@ -498,7 +507,8 @@ class TestPortfolioRiskManager(unittest.TestCase):
             ticker="AAPL",
             proposed_shares=100,
             entry_price=150.0,
-            portfolio_equity=100000,
+            # $10M book: $15k position is 0.15% of equity, well under the 3% sector cap
+            portfolio_equity=10_000_000,
         )
 
         self.assertTrue(result.approved)
@@ -552,7 +562,7 @@ class TestPortfolioRiskManager(unittest.TestCase):
 
         position = self.prm.positions["AAPL"]
         self.assertEqual(position.unrealized_pnl, 500.0)  # +$5 per share
-        self.assertEqual(position.unrealized_pnl_pct, 3.33)
+        self.assertAlmostEqual(position.unrealized_pnl_pct, 3.33, places=2)
 
     def test_update_position_price_stop_hit(self):
         """Test position exit on stop hit."""
@@ -661,8 +671,8 @@ class TestPortfolioRiskManager(unittest.TestCase):
 
         metrics = self.prm.update_metrics(self.start_time)
         self.assertEqual(metrics.open_positions_count, 2)
-        # Tech exposure: (100*150 + 50*300) / 100000 = 0.30%
-        self.assertAlmostEqual(metrics.max_sector_exposure_pct, 0.30, places=2)
+        # Tech exposure: (100*150 + 50*300) / 100000 = 0.30 -> 30% (max_sector_exposure_pct is 0-100 scale)
+        self.assertAlmostEqual(metrics.max_sector_exposure_pct, 30.0, places=2)
 
 
 class TestEdgeCases(unittest.TestCase):

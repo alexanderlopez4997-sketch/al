@@ -12,8 +12,6 @@ Demonstrates:
 - Real-time portfolio metrics
 """
 
-import sys
-from datetime import datetime, timedelta
 from portfolio_risk_integration import RiskEngine
 
 print("=" * 80)

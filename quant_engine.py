@@ -2289,6 +2289,13 @@ def build_morning_briefs(results, finnhub_key):
         ahpx = alpaca_latest_trade(t, akey, asec) if (akey and asec) else None
         ah_chg = (ahpx / reg - 1) * 100 if ahpx else 0.0
         ins = insider_signal(finnhub_insiders(t, finnhub_key)) if finnhub_key else None
+        if ins is None:
+            # No Finnhub key (or no coverage) — fall back to parsing the actual
+            # Form 4 XML off EDGAR directly, no API key required.
+            try:
+                ins = edgar.form4_insider_bias(t)
+            except Exception:
+                ins = None
         try:
             fil = edgar.recent_filings(t, days=2)
         except Exception:

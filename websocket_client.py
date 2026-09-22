@@ -4,12 +4,10 @@
 WebSocket client for real-time aggregate minute data using massive.com API.
 Subscribes to live market data and maintains rolling windows for diagnostics.
 """
-import json
 import threading
 import time
-from collections import defaultdict, deque
+from collections import deque
 from datetime import datetime
-import queue
 
 try:
     from massive import WebSocketClient
