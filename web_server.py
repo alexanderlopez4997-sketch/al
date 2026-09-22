@@ -450,7 +450,8 @@ def _afterhours_html(tickers, demo):
             f'<td class="ev-ts">{e["ts_label"]}</td></tr>'
             for e in events)
     else:
-        body = '<tr><td colspan="5" class="muted">No fresh filings or insider activity in the last 2 days.</td></tr>'
+        body = ('<tr data-cat="none"><td colspan="5" class="muted">'
+                'No fresh filings or insider activity in the last 2 days.</td></tr>')
 
     table = (f'<table class="newstable"><thead><tr>'
              f'<th>Ticker</th><th>Event</th><th>Description</th><th>Source</th><th>Time</th>'
@@ -1024,7 +1025,7 @@ async function load(url,name){$('main').innerHTML='<div class="loader">Loading '
 function newsFilter(cat,btn){
  document.querySelectorAll('.newsbar .filt').forEach(b=>b.classList.toggle('active',b===btn));
  document.querySelectorAll('.newstable tbody tr').forEach(tr=>{
-  tr.style.display=(cat==='all'||tr.dataset.cat.split(' ').includes(cat))?'':'none';});}
+  tr.style.display=(cat==='all'||(tr.dataset.cat||'').split(' ').includes(cat))?'':'none';});}
 async function screen_(){$('main').innerHTML='<div class="loader">Screening…</div>';
  try{const d=await(await fetch('/api/screen?demo='+demo()+'&tickers='+wl())).json();
   if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}
