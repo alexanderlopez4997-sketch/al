@@ -870,6 +870,11 @@ async function screen_(){$('main').innerHTML='<div class="loader">Screening…</
   if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}
   const f=document.createElement('iframe');f.srcdoc=d.html;$('main').innerHTML='';$('main').appendChild(f);
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+async function mlscreen_(){$('main').innerHTML='<div class="loader">Running ML screen…</div>';
+ try{const d=await(await fetch('/api/ml_screen?demo='+demo()+'&tickers='+wl())).json();
+  if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}
+  const f=document.createElement('iframe');f.srcdoc=d.html;$('main').innerHTML='';$('main').appendChild(f);
+ }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 async function loadDiagnostics(){
  try{const d=await(await fetch('/api/diagnostics?demo='+demo()+'&tickers='+wl())).json();
   if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}
