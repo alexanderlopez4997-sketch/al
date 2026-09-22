@@ -47,8 +47,6 @@ from typing import Dict, Optional, Tuple
 from portfolio_risk_manager import (
     PortfolioRiskManager,
     CorrelationGateDecision,
-    PortfolioMetrics,
-    EngineState,
 )
 
 logger = logging.getLogger("RiskEngine")

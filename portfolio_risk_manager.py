@@ -19,9 +19,8 @@ Test Coverage: Comprehensive edge cases, NaN handling, extreme volatility
 
 import json
 import logging
-import math
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Set
 
@@ -173,23 +172,19 @@ class DynamicCorrelationGate:
         """Register a ticker and its sector for correlation tracking."""
         self.sector_map[ticker] = sector
         if ticker not in self.price_history:
-            if HAS_NUMPY:
-                self.price_history[ticker] = pd.Series(dtype='float64')
-            else:
-                self.price_history[ticker] = {}
+            self.price_history[ticker] = {}
 
     def update_price(self, ticker: str, price: float, timestamp: datetime) -> None:
-        """Add a price observation for correlation matrix updates."""
-        if ticker not in self.price_history:
-            if HAS_NUMPY:
-                self.price_history[ticker] = pd.Series(dtype='float64')
-            else:
-                self.price_history[ticker] = {}
+        """Add a price observation for correlation matrix updates.
 
-        if HAS_NUMPY:
-            self.price_history[ticker][timestamp] = price
-        else:
-            self.price_history[ticker][timestamp] = price
+        Kept as a plain dict (O(1) insert) rather than a growing pd.Series —
+        assigning into a Series by a new index label copies the whole thing,
+        which made streaming updates O(n^2) instead of the documented <5ms.
+        pd.DataFrame(dict-of-dicts) in compute_correlation_matrix() builds
+        the aligned frame just as well as dict-of-Series would."""
+        if ticker not in self.price_history:
+            self.price_history[ticker] = {}
+        self.price_history[ticker][timestamp] = price
 
     def compute_correlation_matrix(self) -> Optional['pd.DataFrame']:
         """
@@ -213,7 +208,7 @@ class DynamicCorrelationGate:
         df = df.tail(self.lookback_bars)
 
         # Handle NaN: forward-fill then backward-fill
-        df = df.fillna(method='ffill').fillna(method='bfill')
+        df = df.ffill().bfill()
         if df.isna().any().any():
             logger.warning("NaN values present after imputation; using pairwise correlation")
 
@@ -321,7 +316,7 @@ class DynamicCorrelationGate:
         return CorrelationGateDecision(
             approved=approved,
             max_shares=max_shares,
-            exposure_ratio=min(exposure_ratio, 1.0) if portfolio_equity > 0 else 0.0,
+            exposure_ratio=exposure_ratio if portfolio_equity > 0 else 0.0,
             limiting_factor=limiting_factor,
             warnings=warnings,
         )
@@ -905,7 +900,6 @@ class PortfolioRiskManager:
 # ================================================================ Tests ===
 if __name__ == "__main__":
     # Quick integration test
-    import sys
 
     print("=" * 70)
     print("Portfolio Risk Manager — Integration Test")

@@ -8,7 +8,6 @@ Network-dependent functions (API fetches) are NOT called — only the pure
 transforms, scoring, and formatting they feed into. Exit code is nonzero on
 any failure so this can gate a launch.
 """
-import math
 import os
 import sys
 import tempfile

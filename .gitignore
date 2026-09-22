@@ -8,3 +8,6 @@ venv/
 account_state.json
 rebalance_log.json
 .env
+meridian_cache.db
+screener_report.html
+*.bak

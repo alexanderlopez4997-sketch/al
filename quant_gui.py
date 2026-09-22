@@ -1108,7 +1108,6 @@ def build_formula_reference():
 
 def build_live_math_segments(res):
     """Plug THIS stock's live numbers into the key formulas."""
-    import numpy as np
     d = res["d"]; row = d.iloc[-1]
     close = float(row["Close"])
     sma20 = float(d["Close"].rolling(20).mean().iloc[-1])
