@@ -305,10 +305,11 @@ def _8k_impact(items):
 
 def _parse_form4(url, timeout=15):
     """Fetch + parse a Form 4 ownership XML into the reporting owner and their
-    genuine open-market activity. Returns {owner, title, is_csuite, buy_usd,
-    sell_usd} or None on any failure. Grants, option exercises, tax
-    withholding and gifts are excluded — they're not a conviction signal,
-    only actual open-market P(urchase)/S(ale) transactions are counted."""
+    genuine open-market activity. Returns {owner, title, is_csuite, is_director,
+    is_officer, is_ten_pct_owner, buy_usd, sell_usd} or None on any failure.
+    Grants, option exercises, tax withholding and gifts are excluded — they're
+    not a conviction signal, only actual open-market P(urchase)/S(ale)
+    transactions are counted."""
     try:
         root = ET.fromstring(_get_bytes(url, timeout))
     except Exception:
@@ -319,6 +320,9 @@ def _parse_form4(url, timeout=15):
     name = (owner_el.findtext("reportingOwnerId/rptOwnerName") or "").strip()
     rel = owner_el.find("reportingOwnerRelationship")
     title = (rel.findtext("officerTitle") or "").strip() if rel is not None else ""
+    is_director = (rel.findtext("isDirector") or "0").strip() in ("1", "true", "True") if rel is not None else False
+    is_officer = (rel.findtext("isOfficer") or "0").strip() in ("1", "true", "True") if rel is not None else False
+    is_ten_pct = (rel.findtext("isTenPercentOwner") or "0").strip() in ("1", "true", "True") if rel is not None else False
     buy_usd = sell_usd = 0.0
     for tx in root.findall(".//nonDerivativeTransaction"):
         code = (tx.findtext("transactionCoding/transactionCode") or "").strip()
@@ -334,6 +338,7 @@ def _parse_form4(url, timeout=15):
         else:
             sell_usd += shares * price
     return {"owner": name, "title": title, "is_csuite": bool(C_SUITE_RE.search(title)),
+            "is_director": is_director, "is_officer": is_officer, "is_ten_pct_owner": is_ten_pct,
             "buy_usd": buy_usd, "sell_usd": sell_usd}
 
 
@@ -399,9 +404,10 @@ def recent_filings(ticker, days=4, timeout=15):
     bearish) rather than just "a Form 4 was filed"; a flood of buying
     insiders or multiple C-suite officers selling at once is called out in
     `note` (_flag_insider_flood). Each Form 4 entry also carries `buy_usd`,
-    `sell_usd`, `title` (reporting person's role) and `owner_name` as plain
-    fields — not just baked into `note` — for callers (e.g. a UI badge) that
-    want the structured amount rather than a parsed string. For a
+    `sell_usd`, `title` (reporting person's role), `owner_name`, and
+    `is_director`/`is_officer`/`is_ten_pct_owner` as plain fields — not just
+    baked into `note` — for callers (e.g. a UI badge, or signal_score() below)
+    that want the structured amount/role rather than a parsed string. For a
     role-weighted, 10b5-1-discounted AGGREGATE across a rolling 24-72h
     window with exponential time decay (rather than one filing's own
     transactions), see form4_insider_bias().
@@ -441,7 +447,9 @@ def recent_filings(ticker, days=4, timeout=15):
             if detail:
                 owner, csuite = detail["owner"], detail["is_csuite"]
                 extra = {"buy_usd": detail["buy_usd"], "sell_usd": detail["sell_usd"],
-                         "title": detail["title"], "owner_name": detail["owner"]}
+                         "title": detail["title"], "owner_name": detail["owner"],
+                         "is_director": detail["is_director"], "is_officer": detail["is_officer"],
+                         "is_ten_pct_owner": detail["is_ten_pct_owner"]}
                 if detail["buy_usd"] != detail["sell_usd"] and (detail["buy_usd"] or detail["sell_usd"]):
                     bias = 1 if detail["buy_usd"] > detail["sell_usd"] else -1
                     usd = detail["buy_usd"] if bias > 0 else detail["sell_usd"]
@@ -473,6 +481,40 @@ def recent_filings(ticker, days=4, timeout=15):
     return out
 
 
+# Max magnitude signal_score() can produce: bias in {-1, 0, 1} times the
+# widest role weight (CEO_CFO_WEIGHT below, once defined).
+SIGNAL_SCORE_BOUND = 2.0
+
+
+def signal_score(row):
+    """Composite, sign-directional strength for one recent_filings() row —
+    `bias` scaled by the row's own weight, so magnitude is comparable across
+    row types: bigger |signal_score| = a stronger, more-conviction-weighted
+    signal, same sign convention as `bias` (positive = bullish).
+
+      Form 4  -> role weight from _role_weight(): CEO/CFO 2.0x, any other
+                 officer or 10%+ owner 1.5x, plain director 1.0x.
+      8-K     -> item/session volatility multiplier (volatility_multiplier *
+                 gap_multiplier); `bias` is always 0 for 8-K (this app never
+                 guesses an 8-K's direction), so this is honestly 0 too —
+                 an 8-K is an attention flag, not a directional signal.
+      other   -> bias alone (weight 1.0) — a dilution filing or an activist
+                 stake disclosure doesn't carry a role or item code to weight by.
+
+    Missing/unrecognized fields fall back to neutral (bias 0 or weight 1.0),
+    never raise. Rounded to 3 places and clamped to ±SIGNAL_SCORE_BOUND as a
+    defensive bound, not because either weighting scheme can exceed it today."""
+    bias = row.get("bias") or 0
+    form = row.get("form")
+    if form == "4":
+        weight = _role_weight(row)
+    elif form == "8-K":
+        weight = row.get("volatility_multiplier", 1.0) * row.get("gap_multiplier", 1.0)
+    else:
+        weight = 1.0
+    return round(max(-SIGNAL_SCORE_BOUND, min(SIGNAL_SCORE_BOUND, bias * weight)), 3)
+
+
 # ===================================================================== Form 4 XML =====
 # recent_filings() above parses each Form 4's OWN transactions in isolation
 # (via _parse_form4) to set that ONE filing's bias/note. It can't tell an
@@ -489,20 +531,23 @@ BULLISH_CODES = {"P"}   # open-market purchase
 BEARISH_CODES = {"S"}   # open-market sale
 IGNORED_CODES = {"A", "M", "F", "D", "G"}
 
-# Reporting-person role -> weight. A CEO/CFO spending their own cash on the
-# open market is a stronger signal than a director's routine trade; a 10%+
-# owner sits between the two (economically motivated, but often a fund with
-# its own liquidity needs rather than a pure conviction signal).
-_TITLE_WEIGHTS = (
-    (("chief executive officer", " ceo", "ceo "), 2.0),
-    (("chief financial officer", " cfo", "cfo "), 1.8),
-    (("chief operating officer", " coo", "coo "), 1.6),
-    (("president",), 1.4),
-)
-TEN_PCT_OWNER_WEIGHT = 1.75
-OFFICER_WEIGHT = 1.2
+# Reporting-person role -> weight, a 3-tier scheme: the two roles with full
+# P&L/operational visibility (CEO, CFO) spending their own cash carry the
+# top multiplier; any other officer (COO, President, General Counsel, ...)
+# or a 10%+ beneficial owner gets a mid-tier bump (economically motivated,
+# even without a C-suite title); a plain director is the baseline.
+CEO_CFO_WEIGHT = 2.0
+OFFICER_WEIGHT = 1.5
 DIRECTOR_WEIGHT = 1.0
-DEFAULT_ROLE_WEIGHT = 1.0
+TEN_PCT_OWNER_WEIGHT = OFFICER_WEIGHT
+DEFAULT_ROLE_WEIGHT = DIRECTOR_WEIGHT
+
+# Substring match on the free-text officerTitle, not an exact-title lookup —
+# SEC filings spell the same role inconsistently ("Chief Executive Officer"
+# vs "President and Chief Executive Officer" vs "Chief Executive Officer &
+# President"), so a plain lookup would silently miss real CEOs/CFOs.
+_CEO_CFO_TITLE_MARKERS = ("chief executive officer", " ceo", "ceo ",
+                          "chief financial officer", " cfo", "cfo ")
 
 # A transaction flagged as executed under a Rule 10b5-1 trading plan was
 # scheduled in advance, often months earlier — it is compliance housekeeping,
@@ -538,18 +583,14 @@ def _child_text(elem, name, default=None):
 
 
 def _role_weight(tx):
-    """Reporting-person role on one parsed transaction -> a scoring weight."""
+    """Reporting-person role on one parsed transaction -> a scoring weight:
+    CEO/CFO = 2.0x, any other officer or 10%+ owner = 1.5x, director = 1.0x."""
     title = (tx.get("title") or "").lower()
-    for keys, w in _TITLE_WEIGHTS:
-        if any(k in title for k in keys):
-            return w
-    if tx.get("is_ten_pct_owner"):
-        return TEN_PCT_OWNER_WEIGHT
-    if tx.get("is_officer"):
+    if any(marker in title for marker in _CEO_CFO_TITLE_MARKERS):
+        return CEO_CFO_WEIGHT
+    if tx.get("is_officer") or tx.get("is_ten_pct_owner"):
         return OFFICER_WEIGHT
-    if tx.get("is_director"):
-        return DIRECTOR_WEIGHT
-    return DEFAULT_ROLE_WEIGHT
+    return DIRECTOR_WEIGHT
 
 
 def parse_form4_xml(xml_text):

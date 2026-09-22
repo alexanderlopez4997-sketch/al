@@ -453,6 +453,33 @@ check("_role_weight ten-pct owner", edgar._role_weight({"title": "", "is_directo
 check("_role_weight plain director default", edgar._role_weight({"title": "", "is_director": True,
      "is_officer": False, "is_ten_pct_owner": False}) == edgar.DIRECTOR_WEIGHT)
 
+# 3-tier title-weight scheme: CEO/CFO 2.0x, any other officer (or 10%+
+# owner, even without a C-suite title) 1.5x, plain director 1.0x
+check("_role_weight CEO = 2.0x", edgar._role_weight({"title": "Chief Executive Officer"}) == 2.0)
+check("_role_weight CFO = 2.0x", edgar._role_weight({"title": "Chief Financial Officer"}) == 2.0)
+check("_role_weight COO (officer, non-CEO/CFO title) = 1.5x",
+      edgar._role_weight({"title": "Chief Operating Officer", "is_officer": True}) == 1.5)
+check("_role_weight officer without a C-suite-sounding title still 1.5x",
+      edgar._role_weight({"title": "General Counsel", "is_officer": True}) == 1.5)
+check("_role_weight plain director with no flags = 1.0x",
+      edgar._role_weight({"title": "Director"}) == 1.0)
+
+# signal_score: bias * weight, comparable magnitude across row types
+check("signal_score CEO buy = +2.0 (top weight, bullish)",
+      edgar.signal_score({"form": "4", "bias": 1, "title": "Chief Executive Officer"}) == 2.0)
+check("signal_score officer sell = -1.5",
+      edgar.signal_score({"form": "4", "bias": -1, "title": "", "is_officer": True}) == -1.5)
+check("signal_score director buy = +1.0",
+      edgar.signal_score({"form": "4", "bias": 1, "title": "Director"}) == 1.0)
+check("signal_score 8-K is always 0 — bias is never guessed for 8-K",
+      edgar.signal_score({"form": "8-K", "bias": 0, "volatility_multiplier": 1.6, "gap_multiplier": 1.5}) == 0.0)
+check("signal_score dilution filing = bias alone (-1.0)",
+      edgar.signal_score({"form": "424B5", "bias": -1}) == -1.0)
+check("signal_score never exceeds SIGNAL_SCORE_BOUND",
+      abs(edgar.signal_score({"form": "4", "bias": 1, "title": "Chief Executive Officer"})) <= edgar.SIGNAL_SCORE_BOUND)
+check("signal_score missing fields degrade to neutral, never raise",
+      edgar.signal_score({}) == 0.0)
+
 # rate limiting: a token bucket bounds ANY 1-second window to
 # capacity + rate*1.0 requests — verify the configured constants actually
 # hold that bound, and that a fresh bucket enforces it in practice.

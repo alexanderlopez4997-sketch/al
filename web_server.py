@@ -368,6 +368,7 @@ def _demo_feed_rows():
          "accepted": ago(42), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810",
          "source": "SEC EDGAR [DEMO]"},
         {"ticker": "PLTR", "form": "8-K", "bias": 0, "items": ["5.02"], "impact": "high", "session": "pre_market",
+         "volatility_multiplier": 1.6, "gap_multiplier": 1.5,
          "note": "material event (8-K) — exec/director change",
          "accepted": ago(58), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001321655",
          "source": "SEC EDGAR [DEMO]"},
@@ -379,6 +380,7 @@ def _demo_feed_rows():
          "accepted": ago(103), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000002488",
          "source": "SEC EDGAR [DEMO]"},
         {"ticker": "COIN", "form": "8-K", "bias": 0, "items": ["2.02", "9.01"], "impact": "high", "session": "after_hours",
+         "volatility_multiplier": 1.6, "gap_multiplier": 1.2,
          "note": "material event (8-K)",
          "accepted": ago(140), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001679788",
          "source": "SEC EDGAR [DEMO]"},
@@ -387,6 +389,7 @@ def _demo_feed_rows():
          "accepted": ago(171), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001783879",
          "source": "SEC EDGAR [DEMO]"},
         {"ticker": "MARA", "form": "8-K", "bias": 0, "items": ["1.01"], "impact": "high", "session": "regular",
+         "volatility_multiplier": 1.6, "gap_multiplier": 1.0,
          "note": "material event (8-K)",
          "accepted": ago(205), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001507605",
          "source": "SEC EDGAR [DEMO]"},
@@ -398,6 +401,7 @@ def _demo_feed_rows():
          "accepted": ago(266), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001326801",
          "source": "SEC EDGAR [DEMO]"},
         {"ticker": "AAPL", "form": "8-K", "bias": 0, "items": ["7.01"], "impact": "low", "session": "regular",
+         "volatility_multiplier": 1.0, "gap_multiplier": 1.0,
          "note": "material event (8-K)",
          "accepted": ago(301), "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000320193",
          "source": "SEC EDGAR [DEMO]"},
@@ -408,19 +412,26 @@ def _feed_rows(tickers, demo):
     """Flat, ticker-tagged filing rows across `tickers`, newest first — the
     payload for /api/feed. Each single ticker's fetch is independent, so one
     bad symbol or a transient SEC hiccup drops that ticker's rows, never the
-    whole feed."""
+    whole feed. Every row (demo included) carries `signal_score`
+    (edgar.signal_score) — bias scaled by the reporting person's role weight
+    for Form 4 (CEO/CFO 2.0x, other officer/10%+ owner 1.5x, director 1.0x),
+    or by the item/session volatility multiplier for 8-K — so the frontend
+    can sort/rank the feed by conviction, not just chronologically."""
     if demo:
-        return _demo_feed_rows()
-    rows = []
+        rows = _demo_feed_rows()
+    else:
+        rows = []
 
-    def one(t):
-        for f in _try(lambda: edgar.recent_filings(t, days=2), []):
-            row = dict(f)
-            row["ticker"] = t
-            row.setdefault("source", "SEC EDGAR")
-            rows.append(row)
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        list(ex.map(one, tickers))
+        def one(t):
+            for f in _try(lambda: edgar.recent_filings(t, days=2), []):
+                row = dict(f)
+                row["ticker"] = t
+                row.setdefault("source", "SEC EDGAR")
+                rows.append(row)
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(one, tickers))
+    for row in rows:
+        row["signal_score"] = _try(lambda r=row: edgar.signal_score(r), 0.0)
     rows.sort(key=lambda r: r.get("accepted") or "", reverse=True)
     return rows
 
