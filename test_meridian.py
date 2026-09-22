@@ -11,6 +11,8 @@ any failure so this can gate a launch.
 import os
 import sys
 import tempfile
+import time
+import unittest.mock
 
 import numpy as np
 import pandas as pd
@@ -450,6 +452,72 @@ check("_role_weight ten-pct owner", edgar._role_weight({"title": "", "is_directo
      "is_officer": False, "is_ten_pct_owner": True}) == edgar.TEN_PCT_OWNER_WEIGHT)
 check("_role_weight plain director default", edgar._role_weight({"title": "", "is_director": True,
      "is_officer": False, "is_ten_pct_owner": False}) == edgar.DIRECTOR_WEIGHT)
+
+# rate limiting: a token bucket bounds ANY 1-second window to
+# capacity + rate*1.0 requests — verify the configured constants actually
+# hold that bound, and that a fresh bucket enforces it in practice.
+check("RATE_LIMIT constants stay strictly under SEC's 10 req/s ceiling",
+      edgar.RATE_LIMIT_BURST + edgar.RATE_LIMIT_PER_SEC * 1.0 < 10.0)
+_tb = edgar._TokenBucket(rate=7.0, capacity=2.0)
+_tb_start = time.time()
+for _ in range(9):
+    _tb.acquire()
+_tb_elapsed = time.time() - _tb_start
+check("_TokenBucket throttles to ~configured rate, not faster",
+      _tb_elapsed >= (9 - 2) / 7.0 - 0.1)
+
+# in-memory TTL cache: expiry + LRU eviction
+_c = edgar._TTLCache(maxsize=2)
+_c.set("a", b"1", ttl=0.05)
+_c.set("b", b"2", ttl=10)
+check("_TTLCache returns a fresh value before expiry", _c.get("a") == b"1")
+time.sleep(0.08)
+check("_TTLCache entry expires after its TTL", _c.get("a") is edgar._TTLCache._MISS)
+_c.set("c", b"3", ttl=10)
+_c.set("d", b"4", ttl=10)  # maxsize=2 -> least-recently-used of {b, c} evicted
+check("_TTLCache evicts LRU past maxsize",
+      (_c.get("b") is edgar._TTLCache._MISS) or (_c.get("c") is edgar._TTLCache._MISS))
+
+# TTL routing: a "recent filings" index is short-lived, a filed document is
+# effectively permanent (SEC never revises an accepted accession in place)
+check("_cache_ttl_for gives submissions index the short TTL",
+      edgar._cache_ttl_for("https://data.sec.gov/submissions/CIK0000320193.json") == edgar.SUBMISSIONS_CACHE_TTL)
+check("_cache_ttl_for gives a filed document the long TTL",
+      edgar._cache_ttl_for("https://www.sec.gov/Archives/edgar/data/320193/0/doc.xml") == edgar.DOCUMENT_CACHE_TTL)
+
+# _get() and _get_bytes() must share one cache entry per URL — a Form 4 XML
+# fetched by one path warms the cache for the other instead of double-fetching
+edgar.clear_http_cache()
+_fake_calls = []
+
+
+class _FakeResp:
+    def __init__(self, data):
+        self._data = data
+
+    def read(self):
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _fake_urlopen(req, timeout=15):
+    _fake_calls.append(req.full_url)
+    return _FakeResp(b"<xml/>")
+
+
+with unittest.mock.patch("urllib.request.urlopen", _fake_urlopen):
+    _dedup_url = "https://www.sec.gov/Archives/edgar/data/1/2/doc.xml"
+    _b1 = edgar._get_bytes(_dedup_url)
+    _s1 = edgar._get(_dedup_url)
+    _b2 = edgar._get_bytes(_dedup_url)
+    check("_get/_get_bytes share the HTTP cache by URL",
+          _b1 == b"<xml/>" and _s1 == "<xml/>" and _b2 == b"<xml/>" and len(_fake_calls) == 1)
+edgar.clear_http_cache()
 
 # ------------------------------------------------------------- leaderboard --
 section("leaderboard")

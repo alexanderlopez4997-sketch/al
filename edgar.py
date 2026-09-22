@@ -33,11 +33,16 @@ Two things go a level deeper than the submissions-index metadata above:
                volatility multiplier, and the filing's session (pre-market /
                after-hours) drives a gap-risk multiplier — see recent_filings().
 
-No API key. SEC requires a declarative User-Agent and allows ~10 req/s.
+No API key. SEC requires a declarative User-Agent and allows ~10 req/s — every
+outbound request funnels through _get()/_get_bytes() below, which enforce
+that ceiling with a token bucket and dedupe repeat fetches with an in-memory
+TTL cache (see RATE LIMITING & CACHING further down).
 """
+import collections
 import json
 import os
 import re
+import threading
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -81,14 +86,140 @@ C_SUITE_RE = re.compile(r"\b(chief|ceo|cfo|coo|cto|president|chairman)\b", re.I)
 _OPEN_MARKET = {"P": 1, "S": -1}
 
 
-def _get(url, timeout=15):
-    with urllib.request.urlopen(urllib.request.Request(url, headers=SEC_UA), timeout=timeout) as r:
-        return r.read().decode()
+# =============================================================== RATE LIMITING & CACHING ===
+# This module is called from several ThreadPoolExecutor workers at once
+# (recent_filings() + form4_insider_bias() for N tickers, each pulling a
+# submissions index plus one XML fetch per Form 4 found) — with no shared
+# throttle, that fans out to way more than 10 concurrent requests to SEC
+# well before any single caller's own rate limiting could kick in. Both
+# problems are solved once, centrally, in _get_bytes() — every fetch in this
+# module (including the pre-existing _get_bytes() Form 4 path) goes through it.
+
+# A token bucket, not a fixed-window counter: a fixed window (e.g. "reset a
+# counter to 0 every second") allows a full quota at the END of one window
+# immediately followed by a full quota at the START of the next — up to 2x
+# the intended rate in the 1-second window straddling the boundary. A token
+# bucket has no such edge: over ANY window of length T, the number of
+# requests it can release is bounded by `capacity + rate * T` (start with a
+# full bucket, then accrue at `rate` for the rest of the window). Solving
+# that for T=1s with real margin under SEC's ~10 req/s ceiling:
+#   capacity=2.0, rate=7.0  ->  worst case in any 1s window = 2 + 7*1 = 9 req/s
+# comfortably, provably under 10 — not just "usually" under it.
+RATE_LIMIT_PER_SEC = 7.0
+RATE_LIMIT_BURST = 2.0
+
+
+class _TokenBucket:
+    """Thread-safe, blocking token bucket. acquire() sleeps (never busy-polls
+    past its own lock) until a token is available, then takes it."""
+
+    def __init__(self, rate, capacity):
+        self.rate = float(rate)
+        self.capacity = float(capacity)
+        self._tokens = float(capacity)
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self):
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._tokens = min(self.capacity, self._tokens + (now - self._last) * self.rate)
+                self._last = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                wait = (1.0 - self._tokens) / self.rate
+            time.sleep(wait)
+
+
+_RATE_LIMITER = _TokenBucket(RATE_LIMIT_PER_SEC, RATE_LIMIT_BURST)
+
+# In-memory response cache, keyed by URL, storing raw bytes so _get() (text)
+# and _get_bytes() (bytes) share one entry — a Form 4 XML fetched via one
+# path warms the cache for the other rather than double-fetching the same
+# accession. TTL differs by what the URL actually is: a submissions index
+# (".../submissions/CIK*.json") is the "recent filings" list and changes
+# intraday as new filings land, so it gets a short TTL; an individual filed
+# document (".../Archives/edgar/data/...") is immutable the moment SEC
+# accepts it — an accession number is never revised in place — so it's
+# cached far longer. No persistence: cleared on process restart, like the
+# ticker->CIK map's own in-memory tier.
+HTTP_CACHE_MAXSIZE = 1024
+SUBMISSIONS_CACHE_TTL = 60.0        # seconds — "recent" filings can change any minute
+DOCUMENT_CACHE_TTL = 6 * 3600.0     # seconds — a filed document never changes
+
+
+class _TTLCache:
+    """Thread-safe in-memory cache: per-entry TTL, LRU eviction past maxsize."""
+
+    _MISS = object()
+
+    def __init__(self, maxsize):
+        self._maxsize = maxsize
+        self._data = {}                     # key -> (expires_at or None, value)
+        self._order = collections.OrderedDict()  # key -> None, insertion/access order
+        self._lock = threading.Lock()
+
+    def get(self, key):
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                return self._MISS
+            expires_at, value = entry
+            if expires_at is not None and time.monotonic() >= expires_at:
+                del self._data[key]
+                self._order.pop(key, None)
+                return self._MISS
+            self._order.move_to_end(key)
+            return value
+
+    def set(self, key, value, ttl):
+        with self._lock:
+            self._data[key] = ((time.monotonic() + ttl) if ttl is not None else None, value)
+            self._order[key] = None
+            self._order.move_to_end(key)
+            while len(self._order) > self._maxsize:
+                oldest, _ = self._order.popitem(last=False)
+                self._data.pop(oldest, None)
+
+    def clear(self):
+        with self._lock:
+            self._data.clear()
+            self._order.clear()
+
+
+_HTTP_CACHE = _TTLCache(HTTP_CACHE_MAXSIZE)
+
+
+def _cache_ttl_for(url):
+    if "/submissions/" in url:
+        return SUBMISSIONS_CACHE_TTL
+    if "/Archives/edgar/data/" in url:
+        return DOCUMENT_CACHE_TTL
+    return SUBMISSIONS_CACHE_TTL  # conservative default (e.g. company_tickers.json)
+
+
+def clear_http_cache():
+    """Drop every cached SEC response. Callers rarely need this — a stale
+    submissions-index entry self-expires within SUBMISSIONS_CACHE_TTL — but
+    it's here for tests and for forcing a fresh read on demand."""
+    _HTTP_CACHE.clear()
 
 
 def _get_bytes(url, timeout=15):
+    cached = _HTTP_CACHE.get(url)
+    if cached is not _TTLCache._MISS:
+        return cached
+    _RATE_LIMITER.acquire()
     with urllib.request.urlopen(urllib.request.Request(url, headers=SEC_UA), timeout=timeout) as r:
-        return r.read()
+        data = r.read()
+    _HTTP_CACHE.set(url, data, _cache_ttl_for(url))
+    return data
+
+
+def _get(url, timeout=15):
+    return _get_bytes(url, timeout).decode()
 
 
 def _load_ciks():
