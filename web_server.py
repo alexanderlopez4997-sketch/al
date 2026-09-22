@@ -69,6 +69,14 @@ AUTH_PASSWORD_GENERATED = AUTH_PASSWORD is None
 if AUTH_PASSWORD is None:
     AUTH_PASSWORD = secrets.token_urlsafe(12)
 
+# CORS — off by default (same-origin only). Set MERIDIAN_CORS_ORIGIN to the
+# origin your separate frontend runs on (e.g. http://localhost:5173) to let
+# it call /api/feed directly, or to "*" for any origin. Scoped to /api/feed
+# only, not the whole API surface: that endpoint is read-only EDGAR/news
+# data, unlike /api/analyze and friends which can reflect account-sizing
+# inputs back in their output.
+CORS_ORIGIN = os.environ.get("MERIDIAN_CORS_ORIGIN", "")
+
 TAG = {"txt": "#C9D6E2", "dim": "#6B7E92", "buy": "#2ECC8F", "sell": "#FF5449",
        "warn": "#E0A83B", "head": "#E8EEF5", "big": "#FFFFFF", "gold": "#C8A24B",
        "formula": "#E8D9A8", "blue": "#4F9DE0"}
@@ -579,11 +587,37 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, body, ctype="application/json", status=200):
+    def _send(self, body, ctype="application/json", status=200, extra_headers=None):
         b = body.encode() if isinstance(body, str) else body
         self.send_response(status); self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(b))); self.end_headers()
+        self.send_header("Content-Length", str(len(b)))
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
         self.wfile.write(b)
+
+    def _cors_headers(self):
+        """CORS headers for /api/feed, or {} when MERIDIAN_CORS_ORIGIN is unset
+        (same-origin only — the default). Never echoes an arbitrary Origin
+        header back: only CORS_ORIGIN's own configured value (or "*") is sent,
+        so an unset/empty config can't be tricked into allowing anything."""
+        if not CORS_ORIGIN:
+            return {}
+        return {
+            "Access-Control-Allow-Origin": CORS_ORIGIN,
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Authorization, Content-Type",
+            "Vary": "Origin",
+        }
+
+    def do_OPTIONS(self):
+        # CORS preflight — sent by browsers before a cross-origin GET that
+        # carries an Authorization header. No auth required (browsers never
+        # attach credentials to the preflight itself); only /api/feed answers.
+        if urlparse(self.path).path != "/api/feed" or not CORS_ORIGIN:
+            return self._send(b"", "text/plain", status=404)
+        headers = dict(self._cors_headers()); headers["Access-Control-Max-Age"] = "600"
+        return self._send(b"", "text/plain", status=204, extra_headers=headers)
 
     def _authorized(self):
         hdr = self.headers.get("Authorization", "")
@@ -601,6 +635,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("WWW-Authenticate", 'Basic realm="Meridian"')
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body)))
+        # Cross-origin /api/feed callers still need CORS headers on a 401,
+        # or the browser reports an opaque CORS failure instead of a
+        # readable "authentication required" the caller can act on.
+        if urlparse(self.path).path == "/api/feed":
+            for k, v in self._cors_headers().items():
+                self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -625,7 +665,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/afterhours":
                 return self._send(json.dumps(_afterhours_html(tks, demo)))
             if u.path == "/api/feed":
-                return self._send(json.dumps({"rows": _feed_rows(tks, demo)}))
+                return self._send(json.dumps({"rows": _feed_rows(tks, demo)}),
+                                  extra_headers=self._cors_headers())
             if u.path == "/api/morning":
                 return self._send(json.dumps(_morning_html(tks, demo)))
             if u.path == "/api/news":
