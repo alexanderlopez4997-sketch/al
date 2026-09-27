@@ -8,9 +8,11 @@ Network-dependent functions (API fetches) are NOT called — only the pure
 transforms, scoring, and formatting they feed into. Exit code is nonzero on
 any failure so this can gate a launch.
 """
+import logging
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest.mock
 
@@ -34,6 +36,7 @@ from meridian_cache import MeridianCache
 import tui_dashboard as td
 import signal_scoring as ss
 import quant_gui as qg
+import web_server as ws
 
 _PASS = _FAIL = 0
 _FAILURES = []
@@ -570,6 +573,32 @@ with unittest.mock.patch("urllib.request.urlopen", _fake_urlopen):
           _b1 == b"<xml/>" and _s1 == "<xml/>" and _b2 == b"<xml/>" and len(_fake_calls) == 1)
 edgar.clear_http_cache()
 
+# graceful timeout handling: a network timeout is logged (not silently
+# swallowed) at the one choke point all SEC requests funnel through, then
+# re-raised into each caller's own `except Exception` degrade path --
+# recent_filings() must still return normally, never propagate the timeout
+# up into /api/feed.
+_log_records = []
+_log_handler = logging.Handler()
+_log_handler.emit = lambda record: _log_records.append(record)
+edgar.logger.addHandler(_log_handler)
+
+
+def _timeout_urlopen(req, timeout=15):
+    raise TimeoutError("timed out")
+
+
+with unittest.mock.patch("urllib.request.urlopen", _timeout_urlopen):
+    check("_get_bytes re-raises a timeout (callers degrade via their own except)",
+          _raises(lambda: edgar._get_bytes("https://data.sec.gov/submissions/CIK0000320193.json")))
+    check("_get_bytes logs the timeout instead of swallowing it silently",
+          any("timed out" in r.getMessage() for r in _log_records))
+    _log_records.clear()
+    check("recent_filings() degrades to [] on a timeout, never raises",
+          edgar.recent_filings("AAPL", days=2) == [])
+edgar.logger.removeHandler(_log_handler)
+edgar.clear_http_cache()
+
 # ------------------------------------------------------------- leaderboard --
 section("leaderboard")
 board = lb.build_leaderboard(qe.UNIVERSE_LIQUID[:30], demo=True)
@@ -886,6 +915,69 @@ _res_calibrated = {
 qg.apply_vol_normalization(_res_calibrated)
 check("per-name calibrated thresholds are left alone (nothing to correct)",
       _res_calibrated["vol_normalization"]["applied"] is False and _res_calibrated["score"] == 25.0)
+
+# ------------------------------------------------------- web_server /api/feed --
+section("web_server /api/feed cache")
+
+
+def _setup_feed_cache():
+    ws._feed_cache.clear()
+    ws._feed_inflight.clear()
+
+
+_setup_feed_cache()
+_feed_calls = []
+
+
+def _fake_feed_rows(tickers, demo):
+    _feed_calls.append((tuple(tickers), demo))
+    time.sleep(0.05)
+    return [{"ticker": tickers[0], "form": "4"}]
+
+
+with unittest.mock.patch.object(ws, "_feed_rows", _fake_feed_rows):
+    r1 = ws._cached_feed_rows(["AAPL"], False)
+    r2 = ws._cached_feed_rows(["AAPL"], False)
+    check("duplicate /api/feed request is served from cache, not recomputed",
+          r1 == r2 and len(_feed_calls) == 1)
+    r3 = ws._cached_feed_rows(["MSFT"], False)
+    check("a different (tickers, demo) key is not served from another key's cache",
+          r3 != r1 and len(_feed_calls) == 2)
+    r4 = ws._cached_feed_rows(["AAPL"], True)
+    check("demo and live share no cache entry for the same tickers",
+          len(_feed_calls) == 3)
+
+_setup_feed_cache()
+_feed_calls = []
+_feed_results = [None] * 6
+
+
+def _worker(i):
+    _feed_results[i] = ws._cached_feed_rows(["NVDA"], False)
+
+
+with unittest.mock.patch.object(ws, "_feed_rows", _fake_feed_rows):
+    threads = [threading.Thread(target=_worker, args=(i,)) for i in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    check("6 concurrent duplicate /api/feed requests share exactly one underlying fetch",
+          len(_feed_calls) == 1 and all(r == _feed_results[0] for r in _feed_results))
+
+_setup_feed_cache()
+
+
+def _flaky_feed_rows(tickers, demo):
+    raise RuntimeError("SEC unreachable")
+
+
+with unittest.mock.patch.object(ws, "_feed_rows", _flaky_feed_rows):
+    check("a leader's exception propagates rather than caching a bad result",
+          _raises(lambda: ws._cached_feed_rows(["TSLA"], False)))
+    check("a failed leader's in-flight entry is cleaned up, not left stuck",
+          ("TSLA",) not in [k[0] for k in ws._feed_inflight])
+_setup_feed_cache()
 
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")

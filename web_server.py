@@ -27,6 +27,7 @@ import os
 import secrets
 import socket
 import threading
+import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -532,15 +533,80 @@ def _demo_feed_rows():
     ]
 
 
+# In-memory, single-flight TTL cache for /api/feed's assembled response --
+# keyed by (tickers, demo). edgar.py's own HTTP cache already dedupes the
+# raw SEC calls underneath (60s for a submissions index), but not the
+# ThreadPoolExecutor fan-out + per-row signal-score + sort work above it,
+# and offers no protection if two /api/feed requests for the same tickers
+# race in before that HTTP cache is warm -- both would still hit SEC. This
+# cache serves duplicate/concurrent requests for the same query from one
+# shared result instead.
+_FEED_CACHE_TTL = 60.0  # matches edgar.SUBMISSIONS_CACHE_TTL: the feed is only as fresh as that index
+_feed_cache = {}
+_feed_cache_lock = threading.Lock()
+_feed_inflight = {}  # key -> threading.Event, held by whichever call is currently computing it
+
+
+def _cached_feed_rows(tickers, demo):
+    key = (tuple(sorted(tickers)), demo)
+    now = time.time()
+    with _feed_cache_lock:
+        hit = _feed_cache.get(key)
+        if hit is not None and now - hit[1] < _FEED_CACHE_TTL:
+            return hit[0]
+
+    is_leader = False
+    with _feed_cache_lock:
+        event = _feed_inflight.get(key)
+        if event is None:
+            event = _feed_inflight[key] = threading.Event()
+            is_leader = True
+
+    if not is_leader:
+        # Someone else is already computing this exact (tickers, demo) --
+        # wait and share their result instead of piling on a redundant fetch.
+        if event.wait(timeout=45):
+            with _feed_cache_lock:
+                hit = _feed_cache.get(key)
+                if hit is not None:
+                    return hit[0]
+        # Leader timed out or errored without caching a result -- fall
+        # through and compute it ourselves rather than hanging forever.
+
+    try:
+        rows = _feed_rows(list(key[0]), demo)
+        with _feed_cache_lock:
+            _feed_cache[key] = (rows, now)
+            # Bound growth: /api/feed takes arbitrary `tickers`, so sweep any
+            # entry whose TTL has passed rather than keeping every distinct
+            # ticker-set ever queried.
+            to_del = [k for k, (_, ts) in _feed_cache.items() if now - ts > _FEED_CACHE_TTL]
+            for k in to_del:
+                del _feed_cache[k]
+    finally:
+        if is_leader:
+            with _feed_cache_lock:
+                done = _feed_inflight.pop(key, None)
+            # Cache write above happens-before this signal, so a follower
+            # woken by wait() always finds the result already cached.
+            if done is not None:
+                done.set()
+    return rows
+
+
 def _feed_rows(tickers, demo):
     """Flat, ticker-tagged filing rows across `tickers`, newest first — the
     payload for /api/feed. Each single ticker's fetch is independent, so one
-    bad symbol or a transient SEC hiccup drops that ticker's rows, never the
-    whole feed. Every row (demo included) carries `signal_score`
-    (edgar.signal_score) — bias scaled by the reporting person's role weight
-    for Form 4 (CEO/CFO 2.0x, other officer/10%+ owner 1.5x, director 1.0x),
-    or by the item/session volatility multiplier for 8-K — so the frontend
-    can sort/rank the feed by conviction, not just chronologically."""
+    bad symbol or a transient SEC hiccup (including a network timeout --
+    edgar._get_bytes logs it, but every fetch here is still wrapped in
+    _try) drops that ticker's rows, never the whole feed. Every row (demo
+    included) carries `signal_score` (edgar.signal_score) — bias scaled by
+    the reporting person's role weight for Form 4 (CEO/CFO 2.0x, other
+    officer/10%+ owner 1.5x, director 1.0x), or by the item/session
+    volatility multiplier for 8-K — so the frontend can sort/rank the feed
+    by conviction, not just chronologically. Called only through
+    _cached_feed_rows (which /api/feed uses) so duplicate requests for the
+    same tickers/demo are served from cache instead of re-running this."""
     if demo:
         rows = _demo_feed_rows()
     else:
@@ -800,7 +866,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/afterhours":
                 return self._send(json.dumps(_afterhours_html(tks, demo)))
             if u.path == "/api/feed":
-                return self._send(json.dumps({"rows": _feed_rows(tks, demo)}),
+                return self._send(json.dumps({"rows": _cached_feed_rows(tks, demo)}),
                                   extra_headers=self._cors_headers())
             if u.path == "/api/morning":
                 return self._send(json.dumps(_morning_html(tks, demo)))
