@@ -40,10 +40,12 @@ TTL cache (see RATE LIMITING & CACHING further down).
 """
 import collections
 import json
+import logging
 import os
 import re
 import threading
 import time
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
@@ -51,6 +53,16 @@ from datetime import date, datetime, timedelta, timezone
 SEC_UA = {"User-Agent": "Meridian Research meridian-app contact@example.com"}
 _CIK_CACHE = os.path.expanduser("~/.meridian_cache/edgar_ciks.json")
 _cik_map = {}
+
+logger = logging.getLogger("edgar")
+_LOG_PATH = os.path.expanduser("~/.meridian_cache/edgar.log")
+if not logger.handlers:                              # guard against duplicate handlers on reimport
+    os.makedirs(os.path.dirname(_LOG_PATH), exist_ok=True)
+    _handler = logging.FileHandler(_LOG_PATH)
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
 DILUTIVE_FORMS = {"S-3", "S-3ASR", "424B5", "424B4", "424B3"}
 
@@ -212,8 +224,21 @@ def _get_bytes(url, timeout=15):
     if cached is not _TTLCache._MISS:
         return cached
     _RATE_LIMITER.acquire()
-    with urllib.request.urlopen(urllib.request.Request(url, headers=SEC_UA), timeout=timeout) as r:
-        data = r.read()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=SEC_UA), timeout=timeout) as r:
+            data = r.read()
+    except TimeoutError:
+        # Every caller (recent_filings, form4_insider_bias, ...) wraps its SEC
+        # fetches in `except Exception` and degrades that one ticker/filing to
+        # empty rather than failing the whole request -- this re-raises into
+        # that existing degrade path unchanged. Logged here, the one choke
+        # point all SEC requests funnel through, so a timeout is diagnosable
+        # instead of silently vanishing into a swallowed exception upstream.
+        logger.warning("SEC request timed out after %ss: %s", timeout, url)
+        raise
+    except urllib.error.URLError as e:
+        logger.warning("SEC request failed (%s): %s", e.reason, url)
+        raise
     _HTTP_CACHE.set(url, data, _cache_ttl_for(url))
     return data
 
