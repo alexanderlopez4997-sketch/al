@@ -12,9 +12,9 @@
                 box-sizing: border-box;
             }
             body {
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-                background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-                color: #e8eef5;
+                font-family: 'Segoe UI', 'Roboto', 'Inter', -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+                background: #000000;
+                color: #FF8C00;
                 padding: 20px;
                 min-height: 100vh;
             }
@@ -28,17 +28,18 @@
                 align-items: center;
                 margin-bottom: 30px;
                 padding-bottom: 20px;
-                border-bottom: 2px solid #4F9DE0;
+                border-bottom: 2px solid #FF8C00;
             }
             .title {
-                font-size: 2.5em;
+                font-size: 3.5em;
                 font-weight: 700;
-                color: #ffffff;
+                color: #FF8C00;
             }
             .subtitle {
-                font-size: 0.9em;
-                color: #6B7E92;
+                font-size: 1.3em;
+                color: #FF8C00;
                 margin-top: 5px;
+                opacity: 0.85;
             }
             .metrics {
                 display: grid;
@@ -47,31 +48,33 @@
                 margin-bottom: 30px;
             }
             .metric-card {
-                background: rgba(255, 255, 255, 0.05);
-                border: 1px solid rgba(79, 157, 224, 0.2);
+                background: rgba(255, 140, 0, 0.08);
+                border: 2px solid #FF8C00;
                 border-radius: 12px;
-                padding: 20px;
+                padding: 25px;
                 backdrop-filter: blur(10px);
             }
             .metric-label {
-                font-size: 0.9em;
-                color: #6B7E92;
+                font-size: 1.1em;
+                color: #FF8C00;
                 text-transform: uppercase;
                 letter-spacing: 0.5px;
-                margin-bottom: 8px;
+                margin-bottom: 12px;
+                font-weight: 600;
             }
             .metric-value {
-                font-size: 1.8em;
+                font-size: 2.4em;
                 font-weight: 700;
-                color: #ffffff;
+                color: #FF8C00;
             }
             .metric-secondary {
-                font-size: 0.85em;
-                color: #C9D6E2;
-                margin-top: 8px;
+                font-size: 1.1em;
+                color: #FF8C00;
+                margin-top: 12px;
+                opacity: 0.8;
             }
             .change {
-                color: #2ECC8F;
+                color: #FFA500;
                 font-weight: 600;
             }
             .charts {
@@ -81,17 +84,17 @@
                 margin-bottom: 30px;
             }
             .chart-container {
-                background: rgba(255, 255, 255, 0.05);
-                border: 1px solid rgba(79, 157, 224, 0.2);
+                background: rgba(255, 140, 0, 0.08);
+                border: 2px solid #FF8C00;
                 border-radius: 12px;
-                padding: 20px;
+                padding: 25px;
                 backdrop-filter: blur(10px);
             }
             .chart-title {
-                font-size: 1.2em;
+                font-size: 1.6em;
                 font-weight: 600;
-                margin-bottom: 15px;
-                color: #E8EEF5;
+                margin-bottom: 20px;
+                color: #FF8C00;
             }
             #priceChart {
                 max-height: 400px;
@@ -105,21 +108,22 @@
                 gap: 12px;
             }
             .level {
-                padding: 12px;
-                background: rgba(79, 157, 224, 0.1);
-                border-left: 3px solid #4F9DE0;
+                padding: 15px;
+                background: rgba(255, 140, 0, 0.1);
+                border-left: 4px solid #FF8C00;
                 border-radius: 6px;
             }
             .level-label {
-                font-size: 0.8em;
-                color: #6B7E92;
+                font-size: 1em;
+                color: #FF8C00;
                 text-transform: uppercase;
-                margin-bottom: 4px;
+                margin-bottom: 8px;
+                font-weight: 600;
             }
             .level-value {
-                font-size: 1.4em;
+                font-size: 1.8em;
                 font-weight: 700;
-                color: #2ECC8F;
+                color: #FF8C00;
             }
             .info-grid {
                 display: grid;
@@ -127,28 +131,29 @@
                 gap: 15px;
             }
             .info-item {
-                background: rgba(79, 157, 224, 0.08);
-                padding: 15px;
+                background: rgba(255, 140, 0, 0.1);
+                padding: 20px;
                 border-radius: 8px;
-                border: 1px solid rgba(79, 157, 224, 0.15);
+                border: 2px solid #FF8C00;
             }
             .info-label {
-                font-size: 0.85em;
-                color: #6B7E92;
-                margin-bottom: 6px;
+                font-size: 1.05em;
+                color: #FF8C00;
+                margin-bottom: 10px;
+                font-weight: 600;
             }
             .info-value {
-                font-size: 1.3em;
+                font-size: 1.7em;
                 font-weight: 600;
-                color: #E8EEF5;
+                color: #FF8C00;
             }
             .footer {
                 text-align: center;
                 margin-top: 30px;
                 padding-top: 20px;
-                border-top: 1px solid rgba(79, 157, 224, 0.2);
-                color: #6B7E92;
-                font-size: 0.9em;
+                border-top: 2px solid #FF8C00;
+                color: #FF8C00;
+                font-size: 1.1em;
             }
             @media (max-width: 1024px) {
                 .charts {
@@ -261,15 +266,15 @@
             const datasets = [{
                 label: 'AAPL Price',
                 data: prices,
-                borderColor: '#4F9DE0',
-                backgroundColor: 'rgba(79, 157, 224, 0.1)',
-                borderWidth: 2,
+                borderColor: '#FF8C00',
+                backgroundColor: 'rgba(255, 140, 0, 0.2)',
+                borderWidth: 3,
                 fill: true,
                 tension: 0.4,
-                pointBackgroundColor: '#4F9DE0',
-                pointBorderColor: '#ffffff',
-                pointRadius: 4,
-                pointHoverRadius: 6
+                pointBackgroundColor: '#FF8C00',
+                pointBorderColor: '#FFA500',
+                pointRadius: 6,
+                pointHoverRadius: 8
             }];
 
             const priceCtx = document.getElementById('priceChart').getContext('2d');
@@ -284,18 +289,18 @@
                     maintainAspectRatio: true,
                     plugins: {
                         legend: {
-                            labels: { color: '#E8EEF5' }
+                            labels: { color: '#FF8C00', font: { size: 14, weight: 'bold' } }
                         }
                     },
                     scales: {
                         y: {
                             beginAtZero: false,
-                            ticks: { color: '#6B7E92' },
-                            grid: { color: 'rgba(79, 157, 224, 0.1)' }
+                            ticks: { color: '#FF8C00', font: { size: 12, weight: 'bold' } },
+                            grid: { color: 'rgba(255, 140, 0, 0.2)' }
                         },
                         x: {
-                            ticks: { color: '#6B7E92' },
-                            grid: { color: 'rgba(79, 157, 224, 0.1)' }
+                            ticks: { color: '#FF8C00', font: { size: 12, weight: 'bold' } },
+                            grid: { color: 'rgba(255, 140, 0, 0.2)' }
                         }
                     }
                 }
@@ -319,9 +324,9 @@
                     datasets: [{
                         label: 'Frequency',
                         data: bucketValues,
-                        backgroundColor: '#2ECC8F',
-                        borderColor: '#1fa372',
-                        borderWidth: 1
+                        backgroundColor: '#FF8C00',
+                        borderColor: '#FFA500',
+                        borderWidth: 2
                     }]
                 },
                 options: {
@@ -330,17 +335,17 @@
                     maintainAspectRatio: true,
                     plugins: {
                         legend: {
-                            labels: { color: '#E8EEF5' }
+                            labels: { color: '#FF8C00', font: { size: 14, weight: 'bold' } }
                         }
                     },
                     scales: {
                         y: {
-                            ticks: { color: '#6B7E92' },
-                            grid: { color: 'rgba(79, 157, 224, 0.1)' }
+                            ticks: { color: '#FF8C00', font: { size: 12, weight: 'bold' } },
+                            grid: { color: 'rgba(255, 140, 0, 0.2)' }
                         },
                         x: {
-                            ticks: { color: '#6B7E92' },
-                            grid: { color: 'rgba(79, 157, 224, 0.1)' }
+                            ticks: { color: '#FF8C00', font: { size: 12, weight: 'bold' } },
+                            grid: { color: 'rgba(255, 140, 0, 0.2)' }
                         }
                     }
                 }
