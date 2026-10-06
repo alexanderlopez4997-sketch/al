@@ -768,6 +768,64 @@ def _recent_news_html(tickers, demo):
             'Defensive shift indicates recent tone deterioration.</div>'}
 
 
+# ---------------------------------------------------------- dod awards feed ---
+def _dod_awards_html(demo):
+    """Real-time DoD contract awards with contractor news sentiment. Returns HTML."""
+    if demo:
+        demo_awards = [
+            {"ticker": "RTX", "contractor": "Raytheon Technologies", "value_usd": 250_000_000, "date": "2026-10-06",
+             "description": "Missile systems integration contract", "signal": 0.4, "confidence": 0.9, "sentiment": "bullish"},
+            {"ticker": "LMT", "contractor": "Lockheed Martin", "value_usd": 180_000_000, "date": "2026-10-06",
+             "description": "Satellite communications platform", "signal": 0.35, "confidence": 0.85, "sentiment": "bullish"},
+            {"ticker": "NOC", "contractor": "Northrop Grumman", "value_usd": 120_000_000, "date": "2026-10-06",
+             "description": "Defense systems engineering", "signal": 0.25, "confidence": 0.8, "sentiment": "neutral"},
+        ]
+        awards = demo_awards
+    else:
+        fkey = qe.FINNHUB_DEFAULT_KEY
+        avk = os.environ.get("ALPHA_VANTAGE_KEY")
+        awards = _try(lambda: dod_scraper.dod_daily_awards(), [])
+        if not awards:
+            return {"html": '<div class="muted">No DoD contract awards announced today.</div>'}
+        for award in awards:
+            if award.get("ticker"):
+                sentiment_data = _try(lambda a=award: se.news_sentiment(a["ticker"], fkey, avk, days=1))
+                award["sentiment"] = "bullish" if sentiment_data and sentiment_data.get("signal", 0) > 0.1 else (
+                    "bearish" if sentiment_data and sentiment_data.get("signal", 0) < -0.1 else "neutral")
+
+    if not awards:
+        return {"html": '<div class="muted">No DoD contract awards announced today.</div>'}
+
+    rows = ""
+    total_value = 0
+    for award in awards:
+        ticker = award.get("ticker", "?")
+        contractor = award.get("contractor", "Unknown")
+        value = award.get("value_usd", 0)
+        total_value += value
+        desc = award.get("description", "Contract award")
+        date_str = award.get("date", "today")
+        sentiment = award.get("sentiment", "neutral")
+        sentiment_color = "#2ECC8F" if sentiment == "bullish" else "#FF5449" if sentiment == "bearish" else "#E0A83B"
+        signal = award.get("signal", 0)
+        conf = award.get("confidence", 0)
+
+        rows += (f'<div class="ohcard">'
+                f'<div class="ohh">'
+                f'<b>{_html.escape(ticker)} · {_html.escape(contractor)}</b>'
+                f'<span class="tagpill" style="color:{sentiment_color};">{sentiment.upper()}</span>'
+                f'</div>'
+                f'<div class="sub">{_fmt_usd_k(value)} · {_html.escape(desc)}</div>'
+                f'<div class="stat" style="margin-top:8px;font-size:12px">'
+                f'📅 {date_str} · 🎯 signal {signal:+.2f} · confidence {conf:.0%}'
+                f'</div></div>')
+
+    summary = f'{len(awards)} award{"s" if len(awards) != 1 else ""} · {_fmt_usd_k(total_value)} total value'
+    return {"html": f'<div class="stat">{summary}</div><div class="grid3" style="margin-top:16px">{rows}</div>'
+            + '<div class="muted" style="margin-top:14px">Real-time DoD contract awards from defense.gov, scored by '
+              'contractor market cap. Bullish/bearish sentiment reflects 1-day news coverage of the contractor.</div>'}
+
+
 # ------------------------------------------------------------ track record ---
 def _trackrecord_html():
     tickers = sorted({e["ticker"] for e in tr._load()})
@@ -906,6 +964,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(json.dumps(_morning_html(tks, demo)))
             if u.path == "/api/news":
                 return self._send(json.dumps(_recent_news_html(tks, demo)))
+            if u.path == "/api/dod_awards":
+                return self._send(json.dumps(_dod_awards_html(demo)))
             if u.path == "/api/trackrecord":
                 return self._send(json.dumps(_trackrecord_html()))
             if u.path == "/api/screen":
