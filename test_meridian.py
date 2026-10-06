@@ -38,6 +38,7 @@ import signal_scoring as ss
 import quant_gui as qg
 import web_server as ws
 import contracts
+import dod_scraper
 
 _PASS = _FAIL = 0
 _FAILURES = []
@@ -979,6 +980,63 @@ with unittest.mock.patch.object(ws, "_feed_rows", _flaky_feed_rows):
     check("a failed leader's in-flight entry is cleaned up, not left stuck",
           ("TSLA",) not in [k[0] for k in ws._feed_inflight])
 _setup_feed_cache()
+
+# ----------------------------------------- DoD daily scraper (dod_scraper.py) ---
+section("DoD daily contract scraper")
+
+_sample_dod_html = """
+<article>
+  <h2>Lockheed Martin Space Corporation awarded $50,000,000 contract</h2>
+  <time datetime="2026-10-06T21:30:00Z"></time>
+  <p>Lockheed Martin Space Corporation, Bethesda, Maryland, is awarded a $50,000,000
+  firm-fixed-price contract for missile guidance systems development.</p>
+</article>
+
+<article>
+  <h2>Personnel Change: General Retires</h2>
+  <time datetime="2026-10-06T20:00:00Z"></time>
+  <p>General Jones retires after 40 years of service.</p>
+</article>
+
+<article>
+  <h2>Boeing Awarded $125.5 million modification</h2>
+  <time datetime="2026-10-06T18:15:00Z"></time>
+  <p>Boeing, Seattle, Washington awarded $125.5 million contract modification
+  for KC-46A Tanker sustainment and development.</p>
+</article>
+"""
+
+_dod_awards = dod_scraper.dod_daily_awards(html=_sample_dod_html)
+check("DoD parser filters non-contract releases", len(_dod_awards) == 2)
+check("DoD parser extracts award values", all(a.get("value_usd", 0) > 0 for a in _dod_awards))
+
+# Test contractor extraction
+_lmt_award = next((a for a in _dod_awards if "Lockheed" in a.get("contractor", "")), None)
+check("DoD parser extracts contractor names", _lmt_award is not None)
+if _lmt_award:
+    check("DoD parser maps contractor to ticker", _lmt_award.get("ticker") == "LMT")
+
+# Test award scoring (use $1B cap so $50M = 5% = meaningful signal)
+_sig = dod_scraper.dod_award_signal(_lmt_award, market_cap=1e9)
+check("DoD award scoring works with market cap", _sig is not None)
+if _sig:
+    check("DoD signal bounded -1..+1", -1 <= _sig["signal"] <= 1)
+    check("DoD signal confidence is 0..1", 0 <= _sig["confidence"] <= 1)
+
+# Test small-cap scenario
+_sig_small = dod_scraper.dod_award_signal(_lmt_award, market_cap=300e6)
+if _lmt_award and _sig_small:
+    check("DoD $50M to $300M cap shows major signal",
+          _sig_small["signal"] > 0.1)  # >10% of market cap
+
+# Test bulk scoring
+_bulk = dod_scraper.dod_bulk_score(_dod_awards)
+check("DoD bulk scoring returns dict", isinstance(_bulk, dict))
+check("DoD bulk scoring includes tickers", all(k in ["LMT", "BA"] for k in _bulk.keys()))
+
+# Test cron scheduling
+_cron = dod_scraper.schedule_dod_scraper()
+check("DoD scheduler returns cron expression (5pm ET, weekdays)", "0 17" in _cron and "1-5" in _cron)
 
 # -------------------------------------------- gov contracts (contracts.py) ---
 section("gov contracts scoring")
