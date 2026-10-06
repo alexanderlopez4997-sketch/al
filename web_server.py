@@ -51,6 +51,7 @@ import trackrecord as tr
 import websocket_client_v2 as wsc
 import aapl_dashboard as ad
 import contracts
+import dod_scraper
 
 # Defaults to 8788, not 8787, so this doesn't collide with other local dashboards
 # (e.g. a separately cloned Meridian repo) that default to the more common 8787.
@@ -240,12 +241,34 @@ def _full_analyze(sym, demo, optimize=False):
             summary = contracts.summarize_contracts(cs)
             return contracts.contract_signal(summary, market_cap=mcap)
         gov_contracts = _try(_fetch_contracts)
+        # DoD daily awards: fetch and score matching this ticker
+        dod_awards = None
+        def _fetch_dod_awards():
+            awards = dod_scraper.dod_daily_awards()
+            if not awards:
+                return None
+            mcap = contracts.market_cap_from_finnhub(sym, fkey)
+            if not mcap or mcap <= 0:
+                return None
+            ticker_awards = [a for a in awards if a.get("ticker") == sym]
+            if not ticker_awards:
+                return None
+            signals = [dod_scraper.dod_award_signal(a, ticker=sym, market_cap=mcap) for a in ticker_awards]
+            signals = [s for s in signals if s is not None]
+            if not signals:
+                return None
+            if len(signals) == 1:
+                return signals[0]
+            avg_signal = sum(s["signal"] for s in signals) / len(signals)
+            avg_conf = sum(s["confidence"] for s in signals) / len(signals)
+            return {"signal": avg_signal, "confidence": avg_conf, "detail": f"{len(signals)} DoD awards"}
+        dod_awards = _try(_fetch_dod_awards)
         if akey and asec:
             w0, w1 = of.after_hours_window()
             res["orderflow"] = _try(lambda: of.darkpool_blocks(sym, akey, asec, w0, w1, 200000))
         res["sentiment"] = sen
         try:
-            tilt = qe.alt_data_tilt(congress, recs, insiders, whale, se.macro_signal(sen), gov_contracts)
+            tilt = qe.alt_data_tilt(congress, recs, insiders, whale, se.macro_signal(sen), gov_contracts, dod_awards)
             if tilt or market:
                 qe.apply_alt_tilt(res, tilt, market)
         except Exception:
