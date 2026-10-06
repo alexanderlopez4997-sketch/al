@@ -44,6 +44,7 @@ import orderflow as of
 import trackrecord as tr
 import confirmation as cf
 import leaderboard as lb
+import contracts
 from meridian_cache import MeridianCache
 
 try:
@@ -1354,8 +1355,8 @@ def build_report_segments(res, opt, account, risk):
         add("ALT-DATA TILT ", "head")
         add("(adjusts the live rating; backtest above is technical-core only)\n", "dim")
         src_map = {"Congress": "Quiver", "Analyst": "Finnhub",
-                   "Insider": "SEC Form 4", "WhaleFlow": "options+dark pool",
-                   "Macro": "news sentiment"}
+                   "Insider": "SEC Form 4", "GovContracts": "Quiver/Finnhub",
+                   "WhaleFlow": "options+dark pool", "Macro": "news sentiment"}
         for k, p in alt["parts"].items():
             src = src_map.get(k, "")
             contrib = p["signal"] * p["confidence"]
@@ -1936,6 +1937,14 @@ class App:
                         return None
                     spy = _fetch_one_cached(self._price_cache, "SPY", a["period"], a["interval"])
                     return qe.market_context(res["d"], spy)
+                def _contracts():
+                    # Fetch contracts and score them with market cap
+                    cs = contracts.quiver_contracts(sym, qtok)
+                    if not cs:
+                        return None
+                    mcap = contracts.market_cap_from_finnhub(sym, fkey)
+                    summary = contracts.summarize_contracts(cs)
+                    return contracts.contract_signal(summary, market_cap=mcap)
                 jobs = {
                     "recs": lambda: qe.finnhub_recs(sym, fkey),
                     "congress": lambda: qe.quiver_congress(sym, qtok),
@@ -1949,6 +1958,7 @@ class App:
                                                            os.environ.get("ALPHA_VANTAGE_KEY")),
                     "filings": lambda: edgar.recent_filings(sym, days=3),
                     "insider_form4": lambda: edgar.form4_insider_bias(sym),
+                    "contracts": _contracts,
                 }
                 akey, asec = alpaca_keys()
                 if akey and asec:                       # real dark-pool block flow (SIP)
@@ -1963,6 +1973,7 @@ class App:
                         except Exception: out[futs[fu]] = None
                 recs, congress = out.get("recs"), out.get("congress")
                 insiders, whale, market = out.get("insiders"), out.get("whale"), out.get("market")
+                gov_contracts = out.get("contracts")
                 res["fund"] = out.get("fund"); sentiment = out.get("sentiment")
                 res["orderflow"] = out.get("orderflow")
                 res["filings"] = out.get("filings")
@@ -1970,7 +1981,7 @@ class App:
             res["sentiment"] = sentiment
             try:
                 macro = se.macro_signal(sentiment)
-                tilt = qe.alt_data_tilt(congress, recs, insiders, whale, macro)
+                tilt = qe.alt_data_tilt(congress, recs, insiders, whale, macro, gov_contracts)
                 if tilt or market: qe.apply_alt_tilt(res, tilt, market)
             except Exception: pass
             seg = build_report_segments(res, res.get("opt"), a["account"], a["risk"])

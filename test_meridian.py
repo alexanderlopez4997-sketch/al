@@ -37,6 +37,7 @@ import tui_dashboard as td
 import signal_scoring as ss
 import quant_gui as qg
 import web_server as ws
+import contracts
 
 _PASS = _FAIL = 0
 _FAILURES = []
@@ -978,6 +979,70 @@ with unittest.mock.patch.object(ws, "_feed_rows", _flaky_feed_rows):
     check("a failed leader's in-flight entry is cleaned up, not left stuck",
           ("TSLA",) not in [k[0] for k in ws._feed_inflight])
 _setup_feed_cache()
+
+# -------------------------------------------- gov contracts (contracts.py) ---
+section("gov contracts scoring")
+
+# Test contract signal with real market cap
+_sample_contracts = [
+    {
+        "contractValue": 5e6,
+        "date": (pd.Timestamp.today() - pd.Timedelta(days=10)).strftime("%Y-%m-%d"),
+        "agency": "DoD",
+        "description": "Missile guidance system",
+    },
+    {
+        "contractValue": 3e6,
+        "date": (pd.Timestamp.today() - pd.Timedelta(days=45)).strftime("%Y-%m-%d"),
+        "agency": "NASA",
+        "description": "Flight control software",
+    },
+]
+_summary = contracts.summarize_contracts(_sample_contracts)
+check("contract summary tallies total value", _summary["value_total"] == 8e6)
+check("contract summary counts recent (180d window)", _summary["count_recent"] == 2)
+check("contract summary extracts latest awards", len(_summary["latest"]) > 0)
+check("contract days_since is reasonable", _summary["days_since"] is not None and _summary["days_since"] >= 0)
+
+# Test signal generation with market cap
+_sig = contracts.contract_signal(_summary, market_cap=100e6)
+check("contract signal is generated when market_cap provided", _sig is not None)
+if _sig:
+    check("contract signal is bounded -1..+1", -1 <= _sig["signal"] <= 1)
+    check("contract signal has confidence", 0 <= _sig["confidence"] <= 1)
+    check("contract signal includes detail string", isinstance(_sig["detail"], str) and len(_sig["detail"]) > 0)
+
+# Test signal with no market cap
+_sig_no_mcap = contracts.contract_signal(_summary, market_cap=None)
+check("contract signal returns None when market_cap is None", _sig_no_mcap is None)
+
+# Test age decay
+_old_contracts = [
+    {
+        "contractValue": 10e6,
+        "date": (pd.Timestamp.today() - pd.Timedelta(days=150)).strftime("%Y-%m-%d"),
+        "agency": "DoD",
+    }
+]
+_old_summary = contracts.summarize_contracts(_old_contracts)
+_old_sig = contracts.contract_signal(_old_summary, market_cap=500e6)
+if _old_sig and _sig:
+    check("older contract has lower confidence due to age decay",
+          _old_sig["confidence"] < _sig["confidence"])
+
+# Test alt_data_tilt includes GovContracts
+_alt_with_contracts = qe.alt_data_tilt(
+    congress=None,
+    recs=None,
+    insiders=None,
+    whale=None,
+    macro=None,
+    gov_contracts={"signal": 0.5, "confidence": 0.8, "detail": "Test contracts"}
+)
+check("alt_data_tilt accepts gov_contracts parameter", _alt_with_contracts is not None)
+if _alt_with_contracts:
+    check("GovContracts is in alt_data_tilt parts", "GovContracts" in _alt_with_contracts["parts"])
+    check("GovContracts has ALT_WEIGHTS entry", "GovContracts" in qe.ALT_WEIGHTS)
 
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")

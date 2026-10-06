@@ -50,6 +50,7 @@ import morning as mb
 import trackrecord as tr
 import websocket_client_v2 as wsc
 import aapl_dashboard as ad
+import contracts
 
 # Defaults to 8788, not 8787, so this doesn't collide with other local dashboards
 # (e.g. a separately cloned Meridian repo) that default to the more common 8787.
@@ -229,12 +230,22 @@ def _full_analyze(sym, demo, optimize=False):
         res["insider_form4"] = _try(lambda: edgar.form4_insider_bias(sym))
         res["research"] = _try(lambda: rs.fetch_company_research(sym, avk))
         res["primary_filings"] = _try(lambda: edgar.primary_filings(sym), {})
+        # Gov contracts: fetch contracts and score with market cap
+        gov_contracts = None
+        def _fetch_contracts():
+            cs = contracts.quiver_contracts(sym, qtok)
+            if not cs:
+                return None
+            mcap = contracts.market_cap_from_finnhub(sym, fkey)
+            summary = contracts.summarize_contracts(cs)
+            return contracts.contract_signal(summary, market_cap=mcap)
+        gov_contracts = _try(_fetch_contracts)
         if akey and asec:
             w0, w1 = of.after_hours_window()
             res["orderflow"] = _try(lambda: of.darkpool_blocks(sym, akey, asec, w0, w1, 200000))
         res["sentiment"] = sen
         try:
-            tilt = qe.alt_data_tilt(congress, recs, insiders, whale, se.macro_signal(sen))
+            tilt = qe.alt_data_tilt(congress, recs, insiders, whale, se.macro_signal(sen), gov_contracts)
             if tilt or market:
                 qe.apply_alt_tilt(res, tilt, market)
         except Exception:
