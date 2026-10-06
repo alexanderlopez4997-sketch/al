@@ -890,6 +890,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if u.path in ("/", "/index.html"):
                 return self._send(_get_page(), "text/html; charset=utf-8")
+            if u.path == "/aapl":
+                with open("aapl_dashboard.html", "r", encoding="utf-8") as f:
+                    return self._send(f.read(), "text/html; charset=utf-8")
             if u.path == "/api/analyze":
                 return self._send(json.dumps(_full_analyze((g1("ticker", "NVDA") or "NVDA").upper(), demo,
                                                            g1("opt", "0") == "1")))
