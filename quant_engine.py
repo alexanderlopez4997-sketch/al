@@ -110,7 +110,7 @@ UNIVERSE_LIQUID = [
 # the best-documented of these signals. Whale flow is the noisiest.
 ALT_MAX_TILT = 15.0
 ALT_WEIGHTS = {"Insider": 0.28, "Analyst": 0.22, "Congress": 0.20,
-               "Macro": 0.15, "WhaleFlow": 0.15}
+               "GovContracts": 0.15, "Macro": 0.10, "WhaleFlow": 0.05}
 
 # ================================================================ PIPELINE ===
 # Clean modular architecture:
@@ -1478,14 +1478,15 @@ def congress_signal(congress):
             "detail": (f"{rb} buys / {rs} sells last {congress.get('recent_days', 90)}d"
                        + (f" · {ds:.0f}d ago (decay ×{decay:.2f})" if ds is not None else ""))}
 
-def alt_data_tilt(congress, recs, insiders=None, whale=None, macro=None):
-    """Blend congress/analyst/insider/whale-flow/macro-text signals into a bounded
-    point adjustment for the live score. Each source is confidence-scaled, so thin
-    coverage tilts little. Returns {parts, blended, adjustment} or None."""
+def alt_data_tilt(congress, recs, insiders=None, whale=None, macro=None, gov_contracts=None):
+    """Blend congress/analyst/insider/whale-flow/macro-text/gov-contracts signals
+    into a bounded point adjustment for the live score. Each source is confidence-
+    scaled, so thin coverage tilts little. Returns {parts, blended, adjustment} or None."""
     parts = {}
     for name, sig in (("Congress", congress_signal(congress)),
                       ("Analyst", analyst_signal(recs)),
                       ("Insider", insider_signal(insiders)),
+                      ("GovContracts", gov_contracts if (gov_contracts and "signal" in gov_contracts) else None),
                       ("WhaleFlow", whale if (whale and "signal" in whale) else None),
                       ("Macro", macro if (macro and "signal" in macro) else None)):
         if sig:
