@@ -1166,6 +1166,9 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  .tile .v{font-size:11px;letter-spacing:.5px}.tile .sc{float:right;font-family:ui-monospace,monospace;font-weight:800}
  .grid3{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
  .grid2col{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+ .ahsplit{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:20px;align-items:start}
+ .ahsplit h2{color:var(--gold);margin:0 0 12px;font-size:16px}
+ @media(max-width:1000px){.ahsplit{grid-template-columns:minmax(0,1fr)}}
  .ohcard{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:12px;margin-bottom:10px}
  .ohh{display:flex;justify-content:space-between;margin-bottom:6px}.tagpill{font-size:11px;color:var(--amber)}
  .sub{font-size:12px;color:var(--dim);margin-top:3px}.sub a{color:var(--blue,#4F9DE0)}.stat{font-family:ui-monospace,monospace}
@@ -1259,7 +1262,7 @@ function view(v){V=v;document.querySelectorAll('.tab').forEach(t=>t.classList.to
  if(timer){clearInterval(timer);timer=null;}
  if(v==='dash'){refresh();timer=setInterval(refresh,30000);}
  else if(v==='screen')screen_(); else if(v==='watchlist')watchlist_(); else if(v==='mlscreen')mlscreen_();
- else if(v==='ah')load('/api/afterhours','after-hours');
+ else if(v==='ah')afterhours_();
  else if(v==='dod')load('/api/dod_awards','dod awards');
  else if(v==='mb')load('/api/morning','morning brief'); else if(v==='tr')load('/api/trackrecord','track record');
  else if(v==='diag'){loadDiagnostics();timer=setInterval(loadDiagnostics,5000);}
@@ -1335,6 +1338,15 @@ async function load(url,name){$('main').innerHTML='<div class="loader">Loading '
  try{const d=await(await fetch(url+'?demo='+demo()+'&tickers='+wl())).json();
   $('main').innerHTML=d.error?'<div class="card" style="color:var(--sell)">'+d.error+'</div>':d.html;
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+async function afterhours_(){$('main').innerHTML='<div class="loader">Loading after-hours…</div>';
+ const q='?demo='+demo()+'&tickers='+wl();
+ const get=async u=>{try{const d=await(await fetch(u+q)).json();
+  return d.error?'<div class="card" style="color:var(--sell)">'+d.error+'</div>':d.html;
+ }catch(e){return '<div class="card" style="color:var(--sell)">'+e+'</div>';}};
+ const [ah,dod]=await Promise.all([get('/api/afterhours'),get('/api/dod_awards')]);
+ if(V!=='ah')return;
+ $('main').innerHTML='<div class="ahsplit"><section><h2>SEC EDGAR NEWS</h2>'+ah+'</section>'
+  +'<section><h2>DOD CONTRACT AWARDS</h2>'+dod+'</section></div>';}
 function newsFilter(cat,btn){
  document.querySelectorAll('.newsbar .filt').forEach(b=>b.classList.toggle('active',b===btn));
  document.querySelectorAll('.newstable tbody tr').forEach(tr=>{
