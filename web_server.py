@@ -1212,6 +1212,7 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
     <button class="tab" data-v="mlscreen" onclick="view('mlscreen')">ML Screener</button>
     <button class="tab" data-v="diag" onclick="view('diag')">Diagnostics</button>
     <button class="tab" data-v="ah" onclick="view('ah')">After-Hours</button>
+    <button class="tab" data-v="dod" onclick="view('dod')">DoD Awards</button>
     <button class="tab" data-v="mb" onclick="view('mb')">Morning</button>
     <button class="tab" data-v="tr" onclick="view('tr')">Track Record</button>
   </div>
@@ -1237,11 +1238,12 @@ function clock(){const n=new Date(new Date().toLocaleString('en-US',{timeZone:'A
  $('stream').style.color=live?'var(--buy)':'var(--dim)';}
 setInterval(clock,1000);clock();
 function view(v){V=v;document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.v===v));
- $('wlrow').style.display=(v==='dash'||v==='ah'||v==='mb')?'flex':'none';
+ $('wlrow').style.display=(v==='dash'||v==='ah'||v==='dod'||v==='mb')?'flex':'none';
  if(timer){clearInterval(timer);timer=null;}
  if(v==='dash'){refresh();timer=setInterval(refresh,30000);}
  else if(v==='screen')screen_(); else if(v==='watchlist')watchlist_(); else if(v==='mlscreen')mlscreen_();
  else if(v==='ah')load('/api/afterhours','after-hours');
+ else if(v==='dod')load('/api/dod_awards','dod awards');
  else if(v==='mb')load('/api/morning','morning brief'); else if(v==='tr')load('/api/trackrecord','track record');
  else if(v==='diag'){loadDiagnostics();timer=setInterval(loadDiagnostics,5000);}
  else if(v==='analyze')$('main').innerHTML='<div class="muted">Type a ticker → Analyze.</div>';}
