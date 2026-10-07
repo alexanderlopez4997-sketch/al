@@ -1248,7 +1248,7 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  *{box-sizing:border-box} html,body{margin:0;height:100%}
  body{background:var(--bg);color:var(--txt);font-family:-apple-system,"SF Pro Text",Inter,system-ui,sans-serif;
    font-size:14px;display:flex;flex-direction:column;height:100vh}
- .top{display:flex;align-items:center;gap:14px;background:var(--panel);padding:10px 18px;border-bottom:2px solid var(--gold)}
+ .top{display:flex;align-items:center;gap:14px;background:var(--panel);padding:10px 18px}
  .diamond{color:var(--gold);font-size:22px}.brand{font-family:Georgia,serif;font-weight:700;font-size:20px;letter-spacing:1px}
  .sublabel{color:var(--gold);font-size:8px;letter-spacing:1px}.spacer{flex:1}
  .clock{font-family:ui-monospace,Menlo,monospace;font-weight:700}.pill{background:var(--panel2);color:var(--dim);padding:3px 10px;border-radius:3px;font-size:11px;letter-spacing:1px}
