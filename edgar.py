@@ -799,3 +799,110 @@ def form4_insider_bias(ticker, lookback_hours=72, half_life_hours=36, timeout=15
     return {"signal": float(signal), "confidence": float(confidence), "buy_usd": buy_usd,
             "sell_usd": sell_usd, "n_buys": n_buys, "n_sells": n_sells,
             "transactions": transactions, "detail": detail}
+
+
+# =================================================== insider cluster detection ===
+# Standalone from form4_insider_bias() above: that produces one continuous
+# signal across both buys and sells; this instead gates on a specific,
+# narrower pattern (≥N distinct insiders independently buying in the same
+# window) and reports it as a discrete yes/no event with its own confidence.
+# Not wired into recent_filings()/form4_insider_bias() — callers build
+# `form4_records` from whatever Form 4 data they already have. From this
+# module's own output: for each parse_form4_xml() transaction `tx` on a
+# filing `f` (from _form4_filing_index()), a compatible record is
+# {"filing_date": f["when"], "owner_name": tx["owner"], "owner_title": tx["title"],
+# "transaction_code": tx["code"], "shares": tx["shares"], "price_per_share": tx["price"]}
+# — direct_ownership isn't extracted by parse_form4_xml() and defaults to True.
+
+def _safe(rec, key, default):
+    """rec.get(key, default), but also falls back to `default` when the key
+    is present with an explicit None -- a parser upstream that couldn't
+    extract a field often leaves it as None rather than omitting it, and
+    `.get(key, default)` alone only covers the latter case (e.g. `None *
+    price` would otherwise raise TypeError and take down the whole batch
+    instead of just degrading that one record)."""
+    value = rec.get(key, default)
+    return default if value is None else value
+
+
+def detect_insider_clusters(form4_records: list, window_hours: int = 72, min_unique_buyers: int = 2) -> dict:
+    """
+    Analyzes a list of parsed Form 4 records for a given ticker to detect
+    coordinated open-market cluster buying within a rolling time window.
+
+    Each record in form4_records should contain:
+        - filing_date (datetime)
+        - owner_name (str)
+        - owner_title (str e.g., 'CEO', 'CFO', 'Director')
+        - transaction_code (str e.g., 'P', 'S')
+        - shares (float)
+        - price_per_share (float)
+        - direct_ownership (bool)
+    """
+    now = datetime.now(timezone.utc)
+    cutoff_time = now - timedelta(hours=window_hours)
+
+    # 1. Filter for recent, direct open-market purchases (Code 'P')
+    valid_purchases = []
+    for rec in form4_records:
+        f_date = rec.get("filing_date")
+        if f_date and f_date.tzinfo is None:
+            f_date = f_date.replace(tzinfo=timezone.utc)
+
+        if (f_date and f_date >= cutoff_time and
+            rec.get("transaction_code") == "P" and
+            _safe(rec, "direct_ownership", True)):
+            valid_purchases.append(rec)
+
+    if not valid_purchases:
+        return {"cluster_detected": False, "score": 0.0, "confidence": 0.0, "details": "No recent open-market purchases."}
+
+    # 2. Group by unique insider (name/title) to isolate independent actors
+    unique_buyers = set()
+    total_cluster_value = 0.0
+    role_weights = {"ceo": 2.0, "cfo": 2.0, "president": 1.8, "officer": 1.5, "director": 1.0}
+    weighted_conviction = 0.0
+
+    for p in valid_purchases:
+        buyer_id = _safe(p, "owner_name", "unknown")
+        unique_buyers.add(buyer_id)
+
+        shares = _safe(p, "shares", 0.0)
+        price = _safe(p, "price_per_share", 0.0)
+        tx_value = shares * price
+        total_cluster_value += tx_value
+
+        # Determine title weight
+        title = _safe(p, "owner_title", "").lower()
+        weight = 1.0
+        for key, val in role_weights.items():
+            if key in title:
+                weight = val
+                break
+        weighted_conviction += tx_value * weight
+
+    # 3. Evaluate cluster criteria
+    num_buyers = len(unique_buyers)
+    is_cluster = num_buyers >= min_unique_buyers and total_cluster_value >= 100_000.0
+
+    # Calculate normalized signal (0 to 1) and confidence scale
+    # Full confidence reached at $2M+ in role-weighted cluster flow -- uses
+    # weighted_conviction (CEO/CFO buys count more) rather than the raw
+    # dollar total, which is what the role_weights pass above exists for.
+    confidence = min(1.0, weighted_conviction / 2_000_000.0)
+    signal_strength = 1.0 if is_cluster else (0.5 if num_buyers == 1 and total_cluster_value > 250_000 else 0.0)
+
+    details = (
+        f"Detected {num_buyers} unique insider(s) purchasing ${total_cluster_value:,.2f} "
+        f"worth of stock within the last {window_hours} hours."
+    )
+
+    return {
+        "cluster_detected": is_cluster,
+        "unique_buyer_count": num_buyers,
+        "total_value": total_cluster_value,
+        "weighted_conviction": weighted_conviction,
+        "signal": signal_strength,
+        "confidence": confidence,
+        "details": details
+    }

@@ -599,6 +599,41 @@ with unittest.mock.patch("urllib.request.urlopen", _timeout_urlopen):
 edgar.logger.removeHandler(_log_handler)
 edgar.clear_http_cache()
 
+# detect_insider_clusters(): standalone cluster-buying detector, independent
+# of form4_insider_bias()'s continuous signal.
+from datetime import datetime as _datetime, timezone as _timezone
+_now = _datetime.now(_timezone.utc)
+check("detect_insider_clusters: no purchases -> not a cluster",
+      edgar.detect_insider_clusters([])["cluster_detected"] is False)
+_none_heavy = [
+    {"filing_date": _now - timedelta(hours=1), "owner_name": "A", "owner_title": "Chief Executive Officer",
+     "transaction_code": "P", "shares": None, "price_per_share": 50.0, "direct_ownership": True},
+    {"filing_date": _now - timedelta(hours=1), "owner_name": None, "owner_title": None,
+     "transaction_code": "P", "shares": 1000.0, "price_per_share": None, "direct_ownership": None},
+]
+check("detect_insider_clusters: explicit None fields degrade instead of raising",
+      edgar.detect_insider_clusters(_none_heavy)["total_value"] == 0.0)
+_ceo_cluster = [
+    {"filing_date": _now - timedelta(hours=1), "owner_name": "A", "owner_title": "Chief Executive Officer",
+     "transaction_code": "P", "shares": 1000, "price_per_share": 50.0, "direct_ownership": True},
+    {"filing_date": _now - timedelta(hours=1), "owner_name": "B", "owner_title": "Chief Financial Officer",
+     "transaction_code": "P", "shares": 1000, "price_per_share": 50.0, "direct_ownership": True},
+]
+_director_cluster = [
+    {"filing_date": _now - timedelta(hours=1), "owner_name": "A", "owner_title": "Director",
+     "transaction_code": "P", "shares": 1000, "price_per_share": 50.0, "direct_ownership": True},
+    {"filing_date": _now - timedelta(hours=1), "owner_name": "B", "owner_title": "Director",
+     "transaction_code": "P", "shares": 1000, "price_per_share": 50.0, "direct_ownership": True},
+]
+_r_ceo = edgar.detect_insider_clusters(_ceo_cluster)
+_r_dir = edgar.detect_insider_clusters(_director_cluster)
+check("detect_insider_clusters: same-dollar cluster flags as a cluster",
+      _r_ceo["cluster_detected"] is True and _r_dir["cluster_detected"] is True)
+check("detect_insider_clusters: weighted_conviction scales confidence by role, not just raw dollars",
+      _r_ceo["total_value"] == _r_dir["total_value"] == 100_000.0
+      and _r_ceo["weighted_conviction"] > _r_dir["weighted_conviction"]
+      and _r_ceo["confidence"] > _r_dir["confidence"])
+
 # ------------------------------------------------------------- leaderboard --
 section("leaderboard")
 board = lb.build_leaderboard(qe.UNIVERSE_LIQUID[:30], demo=True)
