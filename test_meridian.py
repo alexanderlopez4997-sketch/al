@@ -659,6 +659,37 @@ check("detect_insider_clusters: weighted_conviction scales confidence by role, n
       and _r_ceo["weighted_conviction"] > _r_dir["weighted_conviction"]
       and _r_ceo["confidence"] > _r_dir["confidence"])
 
+# form4_records_from_bias / insider_cluster_for_ticker / dashboard badge
+_acc = (_now - timedelta(hours=2)).isoformat()
+def _btx(owner, title, usd, plan=False):
+    return {"code": "P", "shares": usd / 50.0, "price": 50.0, "usd": usd, "is_10b5_1": plan,
+            "owner": owner, "title": title, "accepted": _acc}
+_bias = {"transactions": [_btx("A", "Chief Executive Officer", 600_000), _btx("B", "Chief Financial Officer", 600_000),
+                          _btx("C", "Director", 900_000, plan=True), {"accepted": "garbage", "code": "P"}]}
+_recs = edgar.form4_records_from_bias(_bias)
+check("form4_records_from_bias: drops 10b5-1 and unparseable rows", len(_recs) == 2)
+check("form4_records_from_bias: None/garbage input -> []",
+      edgar.form4_records_from_bias(None) == [] and edgar.form4_records_from_bias({"transactions": None}) == [])
+_cl = edgar.insider_cluster_for_ticker("TEST", bias=_bias)
+check("insider_cluster_for_ticker: end-to-end cluster from bias (no network)",
+      _cl["cluster_detected"] is True and _cl["unique_buyer_count"] == 2)
+with unittest.mock.patch.object(edgar, "form4_insider_bias", side_effect=RuntimeError("boom")):
+    check("insider_cluster_for_ticker: fetch failure degrades, never raises",
+          edgar.insider_cluster_for_ticker("TEST")["cluster_detected"] is False)
+_hi = ws._insider_cluster_html(_cl)
+check("cluster badge: high-conviction tier renders", "HIGH-CONVICTION INSIDER CLUSTER" in _hi and "cluster-badge high" in _hi)
+_lo = ws._insider_cluster_html({"cluster_detected": True, "unique_buyer_count": 2, "total_value": 120_000.0,
+                                "confidence": 0.1, "details": "x"})
+check("cluster badge: low-confidence cluster uses the plain tier",
+      "INSIDER CLUSTER" in _lo and "HIGH-CONVICTION" not in _lo)
+check("cluster badge: no cluster / None / malformed -> empty string",
+      ws._insider_cluster_html(None) == "" and ws._insider_cluster_html({"cluster_detected": False}) == ""
+      and ws._insider_cluster_html({"cluster_detected": True, "unique_buyer_count": "x"}) == "")
+check("cluster badge: tooltip text is HTML-escaped",
+      "<script>" not in ws._insider_cluster_html({"cluster_detected": True, "details": '"><script>'}))
+check("cluster badge: analyze payload only wires it in the live branch",
+      ws._full_analyze("AAPL", demo=True)["cluster_badge_html"] == "")
+
 # ------------------------------------------------------------- leaderboard --
 section("leaderboard")
 board = lb.build_leaderboard(qe.UNIVERSE_LIQUID[:30], demo=True)
