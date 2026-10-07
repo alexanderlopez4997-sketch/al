@@ -810,6 +810,20 @@ def _recent_news_html(tickers, demo):
 
 
 # ---------------------------------------------------------- dod awards feed ---
+def _dod_value_note(award):
+    """Inline note that tells a DoD headline value apart from the money behind it:
+    '' for a firm award that counts in full, else e.g. ' · CEILING, $0.5M counted'."""
+    face, counted = award.get("value_usd", 0) or 0, dod_scraper.award_counted_usd(award)
+    if award.get("value_kind") == "ceiling":
+        how = ("obligated" if award.get("obligated_usd") is not None else "counted, none reported funded")
+        return (f' · <span style="color:#E0A83B">CEILING</span>'
+                f' <span style="color:#9B9FAE">{_fmt_usd_k(counted)} {how}</span>')
+    if face and counted < face * 0.99:
+        return f' <span style="color:#9B9FAE">· {_fmt_usd_k(counted)} obligated at award</span>'
+    return ""
+
+
+
 def _dod_awards_html(demo):
     """Real-time DoD contract awards with contractor news sentiment. Returns HTML."""
     if demo:
@@ -840,12 +854,14 @@ def _dod_awards_html(demo):
         return {"html": '<div class="muted">No DoD contract awards announced today.</div>'}
 
     rows = ""
-    total_value = 0
+    total_value = total_counted = 0
     for award in awards:
         ticker = award.get("ticker") or "?"
         contractor = award.get("contractor", "Unknown")
         value = award.get("value_usd", 0)
+        counted = dod_scraper.award_counted_usd(award)
         total_value += value
+        total_counted += counted
         desc = award.get("description", "Contract award")
         date_str = award.get("date", "today")
         sentiment = award.get("sentiment", "neutral")
@@ -860,12 +876,13 @@ def _dod_awards_html(demo):
                 f'<b style="color:#B15CDE">{_html.escape(ticker)}</b> <span style="color:#9B4BCC">·</span> <span style="color:#A8D8EA">{_html.escape(contractor)}</span>'
                 f'<span class="tagpill" style="color:{sentiment_color};background:rgba({sentiment_color.lstrip("#")},0.1);">{sentiment.upper()}</span>'
                 f'</div>'
-                f'<div class="sub" style="color:#B8C5D6">{_fmt_usd_k(value)} · {_html.escape(desc)}</div>'
+                f'<div class="sub" style="color:#B8C5D6">{_fmt_usd_k(value)}{_dod_value_note(award)} · {_html.escape(desc)}</div>'
                 f'<div class="stat" style="margin-top:8px;font-size:12px;color:#9B9FAE">'
                 f'📅 {date_str} · {score_txt}'
                 f'</div></div>')
 
-    summary = f'{len(awards)} award{"s" if len(awards) != 1 else ""} · {_fmt_usd_k(total_value)} total value'
+    summary = (f'{len(awards)} award{"s" if len(awards) != 1 else ""} · {_fmt_usd_k(total_value)} announced'
+               + (f' · {_fmt_usd_k(total_counted)} counted toward signals' if abs(total_counted - total_value) > 1 else ''))
     return {"html": f'<div class="stat" style="color:#B15CDE;font-weight:700">⚔️ DoD Contract Intelligence</div>'
             f'<div class="stat" style="color:#A8D8EA;font-size:14px;margin-bottom:16px">{summary}</div>'
             f'<div class="grid3" style="margin-top:12px">{rows}</div>'
@@ -911,7 +928,7 @@ def _gov_contracts_html(tickers, demo):
         for a in awards or []:
             tk = a.get("ticker")
             if tk and tk in tickers and tk not in seen:
-                cards.append({"ticker": tk, "agency": "Dept. of Defense", "value": a.get("value_usd", 0),
+                cards.append({"ticker": tk, "agency": "Dept. of Defense", "value": dod_scraper.award_counted_usd(a),
                               "date": a.get("date", "today"), "description": a.get("description", ""),
                               "n": 1, "signal": None, "src": "DoD"})
         if not qtok and not cards:

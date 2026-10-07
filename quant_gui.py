@@ -1791,15 +1791,25 @@ class App:
             self.d_btn.configure(state="normal")
             return
         total = sum(a.get("value_usd", 0) for a in awards)
+        counted = sum(dod_scraper.award_counted_usd(a) for a in awards)
         o.insert("end", f"{len(awards)} award{'s' if len(awards) != 1 else ''} · "
-                 f"{self._usd_short(total)} total value\n\n", "gold")
+                 f"{self._usd_short(total)} announced"
+                 + (f" · {self._usd_short(counted)} counted toward signals" if abs(counted - total) > 1 else "")
+                 + "\n\n", "gold")
         for aw in awards:
             sent = aw.get("sentiment", "neutral")
             stag = "buy" if sent == "bullish" else "sell" if sent == "bearish" else "warn"
             o.insert("end", f"{aw.get('ticker') or '?':<7}", "big")
             o.insert("end", f"{aw.get('contractor', 'Unknown')}  ", "txt")
             o.insert("end", f"{sent.upper()}\n", stag)
-            o.insert("end", f"       {self._usd_short(aw.get('value_usd', 0))} · "
+            face, cnt = aw.get("value_usd", 0), dod_scraper.award_counted_usd(aw)
+            note = ""
+            if aw.get("value_kind") == "ceiling":
+                note = (f" [CEILING — {self._usd_short(cnt)} "
+                        f"{'obligated' if aw.get('obligated_usd') is not None else 'counted, none reported funded'}]")
+            elif face and cnt < face * 0.99:
+                note = f" [{self._usd_short(cnt)} obligated at award]"
+            o.insert("end", f"       {self._usd_short(face)}{note} · "
                      f"{aw.get('description', 'Contract award')[:140]}\n", "dim")
             if aw.get("signal") is not None:
                 o.insert("end", f"       {aw.get('date', 'today')} · signal {aw['signal']:+.2f} · "

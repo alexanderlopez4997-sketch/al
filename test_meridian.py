@@ -1192,11 +1192,106 @@ check("day release: headings, footnotes and sub-$1M awards are dropped",
 # multiple same-day awards to one ticker are summed, not averaged / last-wins
 _lmt_all = [a for a in _day if a["ticker"] == "LMT"]
 _sum = dod_scraper.dod_signal_for_ticker(_day, "LMT", 100e9)
-check("DoD per-ticker signal sums that ticker's awards",
-      _sum is not None and "awards totaling" in _sum["detail"]
-      and abs(_sum["signal"] - sum(a["value_usd"] for a in _lmt_all) / 100e9) < 1e-9)
+check("DoD per-ticker signal sums that ticker's awards (counted value)",
+      _sum is not None and "DoD awards," in _sum["detail"]
+      and abs(_sum["signal"] - sum(dod_scraper.award_counted_usd(a) for a in _lmt_all) / 100e9) < 1e-9)
 check("DoD bulk score sums too (not last-wins)",
       abs(dod_scraper.dod_bulk_score(_day, lambda t: {"market_cap": 100e9})["LMT"]["signal"] - _sum["signal"]) < 1e-9)
+
+# ---- ceiling vs obligated: what an award is actually worth to a signal
+_pp = dod_scraper._parse_award_paragraph
+_def = _pp("Lockheed Martin Corp., Fort Worth, Texas, has been awarded a $199,303,678 firm-fixed-price contract for F-35 sustainment. "
+           "Fiscal 2026 funds in the amount of $50,000,000 are being obligated at time of award.")
+check("firm contract: kind definite, obligated captured alongside the face value",
+      _def["kind"] == "definite" and _def["obligated"] == 50_000_000 and _def["value"] == 199_303_678)
+_idiq = _pp("Acme Defense Inc., Dayton, Ohio, is awarded a $4,000,000,000 indefinite-delivery/indefinite-quantity contract for parts. "
+            "Fiscal 2026 funds in the amount of $5,000 are being obligated at time of award.")
+check("IDIQ: kind ceiling, only the token minimum is obligated", _idiq["kind"] == "ceiling" and _idiq["obligated"] == 5_000)
+check("multiple-award task order contract is a ceiling (the vehicle, not an order)",
+      _pp("Acme Inc., Dayton, Ohio, is awarded a $90,000,000 multiple-award task order contract.")["kind"] == "ceiling")
+check("ceiling wording BEFORE the amount counts ('with a maximum ceiling of $X')",
+      _pp("Acme Inc., Dayton, Ohio, is awarded a contract with a maximum ceiling of $500,000,000 for services.")["kind"] == "ceiling")
+check("a task order placed under an IDIQ is definite money",
+      _pp("Acme Inc., Dayton, Ohio, is awarded a $30,000,000 firm-fixed-price task order against a previously awarded indefinite-delivery contract.")["kind"] == "definite")
+check("a modification to an IDIQ is definite money",
+      _pp("Acme Inc., Dayton, Ohio, is awarded a $30,000,000 modification to a previously awarded indefinite-delivery/indefinite-quantity contract.")["kind"] == "definite")
+check("funding deferred to later orders is NOT money obligated at award",
+      _pp("Acme Inc., Dayton, Ohio, is awarded a $50,000,000 IDIQ contract. Funds will be obligated as individual task orders are issued.")["obligated"] is None)
+check("'no funds obligated at time of award' is an explicit zero",
+      _pp("Acme Inc., Dayton, Ohio, is awarded a $50,000,000 IDIQ contract. No funds are being obligated at time of award.")["obligated"] == 0.0)
+check("several fund clauses at award are summed",
+      _pp("Acme Inc., Dayton, Ohio, is awarded a $90,000,000 contract. Fiscal 2026 funds in the amount of $5,000,000 and fiscal 2025 funds "
+          "in the amount of $2,000,000 are being obligated at time of award.")["obligated"] == 7_000_000)
+
+_cd = dod_scraper._awards_from_text_blocks([
+    "Acme Defense Inc., Dayton, Ohio, is awarded a $400,000,000 indefinite-delivery/indefinite-quantity contract. "
+    "Fiscal 2026 funds in the amount of $5,000 are being obligated at time of award.",
+    "Beta Corp., Austin, Texas, is awarded a $400,000,000 multiple-award contract.",
+    "Gamma Corp., Austin, Texas, is awarded a $400,000,000 firm-fixed-price contract.",
+    "Delta Corp., Austin, Texas, is awarded a $400,000,000 IDIQ contract. No funds are being obligated at time of award.",
+    "Epsilon Corp., Austin, Texas, is awarded a $20,000,000 firm-fixed-price contract. Funds in the amount of $90,000,000 are being obligated at time of award.",
+], "t", "2026-10-06")
+_cb = {a["contractor"].split()[0]: a for a in _cd}
+check("ceiling with obligated funds counts only the obligated amount",
+      _cb["Acme"]["effective_value_usd"] == 5_000 and _cb["Acme"]["value_usd"] == 400e6 and _cb["Acme"]["obligated_usd"] == 5_000)
+check("ceiling with no funding info is haircut by CEILING_WEIGHT",
+      abs(_cb["Beta"]["effective_value_usd"] - 400e6 * dod_scraper.CEILING_WEIGHT) < 1 and _cb["Beta"]["obligated_usd"] is None)
+check("firm award with no obligation stated counts at face value",
+      _cb["Gamma"]["effective_value_usd"] == 400e6 and _cb["Gamma"]["value_kind"] == "definite")
+check("explicit zero-obligated ceiling counts for nothing", _cb["Delta"]["effective_value_usd"] == 0)
+check("obligated can never exceed face value", _cb["Epsilon"]["obligated_usd"] == 20e6)
+# multi-award: ceiling is split per awardee, THEN haircut (not haircut once and shared 3x)
+_mc = [a for a in _day if a["description"].startswith("Booz Allen")]
+check("multi-award ceiling: split three ways, then haircut",
+      all(abs(a["effective_value_usd"] - 300e6 / 3 * dod_scraper.CEILING_WEIGHT) < 1 and a["value_kind"] == "ceiling" for a in _mc))
+_lmx = [a for a in _day if a["description"].startswith("Lockheed Martin Corp")][0]
+check("day release: a stated obligation drives the counted value, even on a firm award (face kept for display)",
+      _lmx["effective_value_usd"] == 50_000_000 and _lmx["obligated_usd"] == 50_000_000
+      and _lmx["value_usd"] == 199_303_678 and _lmx["value_kind"] == "definite")
+
+# signals follow the counted value, and say why
+_sig_def = dod_scraper.dod_award_signal(_cd[2], market_cap=10e9)
+_sig_ceil = dod_scraper.dod_award_signal(_cd[1], market_cap=10e9)
+check("a $400M firm award out-signals the same-size ceiling",
+      _sig_def["signal"] > 5 * _sig_ceil["signal"] and "ceiling" in _sig_ceil["detail"] and "ceiling" not in _sig_def["detail"])
+check("ceiling detail says funds weren't reported vs. obligated",
+      "no funds reported" in _sig_ceil["detail"]
+      and "obligated of a" in dod_scraper.dod_award_signal(dict(_cd[0], effective_value_usd=5_000_000, obligated_usd=5_000_000), market_cap=1e9)["detail"])
+# ---- parse_contract_financial_obligations (public entry point) + regressions for review findings
+_pf = dod_scraper.parse_contract_financial_obligations
+_r = _pf("Lockheed Martin Corp., Fort Worth, Texas, has been awarded a $199,303,678 firm-fixed-price contract. "
+         "Fiscal 2026 funds in the amount of $50,000,000 are being obligated at time of award.", 199_303_678)
+check("real DoD phrasing (amount BEFORE 'obligated at time of award', 'are being') is found",
+      _r["obligated_value"] == 50e6 and _r["realized_economic_value"] == 50e6 and _r["kind"] == "definite" and _r["vehicle_weight"] == 1.0)
+_r = _pf("Acme Inc. is awarded a $90,000,000 contract. Funds will be obligated at the time of award. "
+         "Cumulative face value of the contract is $400,000,000.", 90e6)
+check("a later cumulative total is never mistaken for the obligated amount",
+      _r["obligated_value"] is None and _r["realized_economic_value"] == 90e6)
+_r = _pf("Acme Inc. is awarded a $30,000,000 modification to a previously awarded indefinite-delivery/indefinite-quantity contract.", 30e6)
+check("a modification to an IDIQ is real money: not discounted",
+      _r["realized_economic_value"] == 30e6 and _r["is_modification"] and _r["is_idiq"]
+      and _r["kind"] == "definite" and _r["vehicle_weight"] == 0.80)
+_r = _pf("Acme Inc. is awarded a $12,000,000 firm-fixed-price contract for center console content.", 12e6)
+check("'nte' inside ordinary words (center, content) does not make a ceiling",
+      not _r["is_ceiling"] and _r["realized_economic_value"] == 12e6)
+_r = _pf("Acme Inc. is awarded a $4,000,000,000 indefinite-delivery/indefinite-quantity contract.", 4e9)
+check("IDIQ with nothing obligated: headline x CEILING_WEIGHT, vehicle_weight 0.25",
+      abs(_r["realized_economic_value"] - 4e9 * dod_scraper.CEILING_WEIGHT) < 1 and _r["vehicle_weight"] == 0.25 and _r["is_idiq"])
+_r = _pf("Acme Inc. is awarded a $4,000,000,000 IDIQ contract. Fiscal 2026 funds in the amount of $5,000 are being obligated at time of award.", 4e9)
+check("IDIQ with a token obligation counts only the obligation", _r["realized_economic_value"] == 5_000)
+_r = _pf("A Inc., X, Ohio; B Inc., Y, Ohio; and C Inc., Z, Ohio, are awarded a $300,000,000 multiple-award contract. "
+         "Fiscal 2026 funds in the amount of $30,000 are being obligated at time of award.", 100e6, n_awardees=3)
+check("joint award: obligated total is shared evenly across awardees", _r["obligated_value"] == 10_000 and _r["realized_economic_value"] == 10_000)
+check("junk / empty input never raises",
+      _pf("", 0)["realized_economic_value"] == 0 and _pf(None, 5e6)["realized_economic_value"] == 5e6)
+check("zero-counted award yields no signal", dod_scraper.dod_award_signal(_cd[3], market_cap=100e9) is None)
+check("legacy / demo awards without effective value still score on face value",
+      dod_scraper.award_counted_usd({"value_usd": 250e6}) == 250e6
+      and dod_scraper.dod_award_signal({"value_usd": 250e6, "contractor": "X"}, market_cap=10e9) is not None)
+_stack = [dict(a, ticker="ZZ") for a in (_cd[1], _cd[2])]
+_stk = dod_scraper.dod_signal_for_ticker(_stack, "ZZ", 100e9)
+check("per-ticker signal stacks COUNTED values (firm + haircut ceiling) and reports the face gap",
+      abs(_stk["signal"] - (400e6 + 40e6) / 100e9) < 1e-12 and "counted of $800M face" in _stk["detail"])
 
 # value extraction: first amount in reading order
 check("value: first $ amount in text order, not first unit seen",
