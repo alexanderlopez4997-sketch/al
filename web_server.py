@@ -810,20 +810,22 @@ def _dod_awards_html(demo):
         signal = award.get("signal", 0)
         conf = award.get("confidence", 0)
 
-        rows += (f'<div class="ohcard">'
+        rows += (f'<div class="ohcard" style="border-left:3px solid #B15CDE">'
                 f'<div class="ohh">'
-                f'<b>{_html.escape(ticker)} · {_html.escape(contractor)}</b>'
-                f'<span class="tagpill" style="color:{sentiment_color};">{sentiment.upper()}</span>'
+                f'<b style="color:#B15CDE">{_html.escape(ticker)}</b> <span style="color:#9B4BCC">·</span> <span style="color:#A8D8EA">{_html.escape(contractor)}</span>'
+                f'<span class="tagpill" style="color:{sentiment_color};background:rgba({sentiment_color.lstrip("#")},0.1);">{sentiment.upper()}</span>'
                 f'</div>'
-                f'<div class="sub">{_fmt_usd_k(value)} · {_html.escape(desc)}</div>'
-                f'<div class="stat" style="margin-top:8px;font-size:12px">'
-                f'📅 {date_str} · 🎯 signal {signal:+.2f} · confidence {conf:.0%}'
+                f'<div class="sub" style="color:#B8C5D6">{_fmt_usd_k(value)} · {_html.escape(desc)}</div>'
+                f'<div class="stat" style="margin-top:8px;font-size:12px;color:#9B9FAE">'
+                f'📅 {date_str} · 🎯 signal <span style="color:#B15CDE">{signal:+.2f}</span> · confidence {conf:.0%}'
                 f'</div></div>')
 
     summary = f'{len(awards)} award{"s" if len(awards) != 1 else ""} · {_fmt_usd_k(total_value)} total value'
-    return {"html": f'<div class="stat">{summary}</div><div class="grid3" style="margin-top:16px">{rows}</div>'
-            + '<div class="muted" style="margin-top:14px">Real-time DoD contract awards from defense.gov, scored by '
-              'contractor market cap. Bullish/bearish sentiment reflects 1-day news coverage of the contractor.</div>'}
+    return {"html": f'<div class="stat" style="color:#B15CDE;font-weight:700">⚔️ DoD Contract Intelligence</div>'
+            f'<div class="stat" style="color:#A8D8EA;font-size:14px;margin-bottom:16px">{summary}</div>'
+            f'<div class="grid3" style="margin-top:12px">{rows}</div>'
+            + '<div class="muted" style="margin-top:16px;color:#8B95A8;font-size:13px">Real-time defense.gov contract awards, scored by '
+              'contractor market cap. Sentiment reflects 1-day news coverage.</div>'}
 
 
 # ------------------------------------------------------------ track record ---
