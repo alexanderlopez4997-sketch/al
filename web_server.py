@@ -50,6 +50,7 @@ import morning as mb
 import trackrecord as tr
 import websocket_client_v2 as wsc
 import aapl_dashboard as ad
+import confirmation as cf
 import contracts
 import dod_scraper
 
@@ -275,7 +276,30 @@ def _full_analyze(sym, demo, optimize=False):
             "information_ratio": round(res.get("verdict", {}).get("information_ratio", 0.0), 3),
             "win_rate": round(res.get("verdict", {}).get("win_rate", 0.5), 3),
             "report": _seg_html(segs),
+            "confirmation_html": _confirmation_html(res),
             "research_html": _research_html(res.get("research"), res.get("primary_filings") or {}, demo)}
+
+
+_CONFIRM_COLOR = {"verified": "#2ECC8F", "partial": "#E0A83B", "weak": "#6B7E92", "kill": "#FF5449"}
+
+
+def _confirmation_html(res):
+    """Green-signal banner for a BUY verdict: headline + signals-agree count +
+    any kill-switches, from confirmation.confirm() (the full per-check list is
+    already in the report text below). "" when it isn't a BUY or confirm()
+    fails — the banner must never break the analysis."""
+    try:
+        cs = cf.confirm(res)
+    except Exception:
+        return ""
+    if cs["level"] == "none":
+        return ""
+    col = _CONFIRM_COLOR.get(cs["level"], "#6B7E92")
+    kills = "".join(f'<div class="sub" style="color:#FF5449">🔴 {_html.escape(lbl)} — {_html.escape(str(det))}</div>'
+                    for lbl, det in cs["kills"])
+    return (f'<div class="card" style="border-left:4px solid {col}">'
+            f'<b style="color:{col};font-size:1.1em">{_html.escape(cs["headline"])}</b>'
+            f' <span class="muted">· {cs["passed"]}/{cs["checkable"]} signals agree</span>{kills}</div>')
 
 
 def _ohlc(sym, demo):
@@ -1295,6 +1319,7 @@ async function go(){const t=$('tk').value.trim().toUpperCase()||'NVDA';
    +'<span class="px">'+a.last.toFixed(2)+' <span style="color:'+cc+'">'+(a.chg>=0?'+':'')+a.chg+'%</span></span>'
    +renderVerdict(a)
    +'<span class="badge '+cls+'">'+a.verdict+'</span></div>'
+   +(a.confirmation_html||'')
    +'<div class="card"><div id="chart"></div></div><div class="card report">'+a.report+'</div>'
    +'<div class="card"><details><summary style="cursor:pointer;color:var(--gold);font-weight:700;letter-spacing:1px;font-size:13px">RESEARCH — company overview · valuation · quality · ownership</summary>'
    +'<div style="margin-top:12px">'+(a.research_html||'')+'</div></details></div>';
