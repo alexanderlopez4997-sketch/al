@@ -242,27 +242,14 @@ def _full_analyze(sym, demo, optimize=False):
             return contracts.contract_signal(summary, market_cap=mcap)
         gov_contracts = _try(_fetch_contracts)
         # DoD daily awards: fetch and score matching this ticker
-        dod_awards = None
         def _fetch_dod_awards():
             awards = dod_scraper.dod_daily_awards()
-            if not awards:
+            if not any(a.get("ticker") == sym for a in awards):
                 return None
             mcap = contracts.market_cap_from_finnhub(sym, fkey)
-            if not mcap or mcap <= 0:
-                return None
-            ticker_awards = [a for a in awards if a.get("ticker") == sym]
-            if not ticker_awards:
-                return None
-            signals = [dod_scraper.dod_award_signal(a, ticker=sym, market_cap=mcap) for a in ticker_awards]
-            signals = [s for s in signals if s is not None]
-            if not signals:
-                return None
-            if len(signals) == 1:
-                return signals[0]
-            avg_signal = sum(s["signal"] for s in signals) / len(signals)
-            avg_conf = sum(s["confidence"] for s in signals) / len(signals)
-            return {"signal": avg_signal, "confidence": avg_conf, "detail": f"{len(signals)} DoD awards"}
+            return dod_scraper.dod_signal_for_ticker(awards, sym, mcap)
         dod_awards = _try(_fetch_dod_awards)
+        res["dod_awards"] = dod_awards              # read by confirmation.confirm()
         if akey and asec:
             w0, w1 = of.after_hours_window()
             res["orderflow"] = _try(lambda: of.darkpool_blocks(sym, akey, asec, w0, w1, 200000))
@@ -787,6 +774,8 @@ def _dod_awards_html(demo):
         awards = _try(lambda: dod_scraper.dod_daily_awards(), [])
         if not awards:
             return {"html": '<div class="muted">No DoD contract awards announced today.</div>'}
+        _try(lambda: dod_scraper.annotate_awards(
+            awards, lambda tk: contracts.market_cap_from_finnhub(tk, fkey)))
         for award in awards:
             if award.get("ticker"):
                 sentiment_data = _try(lambda a=award: se.news_sentiment(a["ticker"], fkey, avk, days=1))
@@ -799,7 +788,7 @@ def _dod_awards_html(demo):
     rows = ""
     total_value = 0
     for award in awards:
-        ticker = award.get("ticker", "?")
+        ticker = award.get("ticker") or "?"
         contractor = award.get("contractor", "Unknown")
         value = award.get("value_usd", 0)
         total_value += value
@@ -807,8 +796,10 @@ def _dod_awards_html(demo):
         date_str = award.get("date", "today")
         sentiment = award.get("sentiment", "neutral")
         sentiment_color = "#2ECC8F" if sentiment == "bullish" else "#FF5449" if sentiment == "bearish" else "#E0A83B"
-        signal = award.get("signal", 0)
-        conf = award.get("confidence", 0)
+        signal = award.get("signal")
+        conf = award.get("confidence")
+        score_txt = (f"🎯 signal {signal:+.2f} · confidence {conf:.0%}"
+                     if signal is not None and conf is not None else "🎯 signal n/a (no ticker/market cap)")
 
         rows += (f'<div class="ohcard">'
                 f'<div class="ohh">'
@@ -817,7 +808,7 @@ def _dod_awards_html(demo):
                 f'</div>'
                 f'<div class="sub">{_fmt_usd_k(value)} · {_html.escape(desc)}</div>'
                 f'<div class="stat" style="margin-top:8px;font-size:12px">'
-                f'📅 {date_str} · 🎯 signal {signal:+.2f} · confidence {conf:.0%}'
+                f'📅 {date_str} · {score_txt}'
                 f'</div></div>')
 
     summary = f'{len(awards)} award{"s" if len(awards) != 1 else ""} · {_fmt_usd_k(total_value)} total value'

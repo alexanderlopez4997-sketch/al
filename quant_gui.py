@@ -45,6 +45,7 @@ import trackrecord as tr
 import confirmation as cf
 import leaderboard as lb
 import contracts
+import dod_scraper
 from meridian_cache import MeridianCache
 
 try:
@@ -1918,6 +1919,7 @@ class App:
                 else:
                     raise
             recs = congress = market = insiders = whale = sentiment = None
+            gov_contracts = dod_awards = None
             if a["demo"]:
                 res["fund"] = fe.demo_fundamentals(a["sym"])
                 sentiment = se.demo_sentiment(a["sym"])
@@ -1945,6 +1947,12 @@ class App:
                     mcap = contracts.market_cap_from_finnhub(sym, fkey)
                     summary = contracts.summarize_contracts(cs)
                     return contracts.contract_signal(summary, market_cap=mcap)
+                def _dod():
+                    awards = dod_scraper.dod_daily_awards()
+                    if not any(a.get("ticker") == sym for a in awards):
+                        return None
+                    mcap = contracts.market_cap_from_finnhub(sym, fkey)
+                    return dod_scraper.dod_signal_for_ticker(awards, sym, mcap)
                 jobs = {
                     "recs": lambda: qe.finnhub_recs(sym, fkey),
                     "congress": lambda: qe.quiver_congress(sym, qtok),
@@ -1959,6 +1967,7 @@ class App:
                     "filings": lambda: edgar.recent_filings(sym, days=3),
                     "insider_form4": lambda: edgar.form4_insider_bias(sym),
                     "contracts": _contracts,
+                    "dod": _dod,
                 }
                 akey, asec = alpaca_keys()
                 if akey and asec:                       # real dark-pool block flow (SIP)
@@ -1974,6 +1983,8 @@ class App:
                 recs, congress = out.get("recs"), out.get("congress")
                 insiders, whale, market = out.get("insiders"), out.get("whale"), out.get("market")
                 gov_contracts = out.get("contracts")
+                dod_awards = out.get("dod")
+                res["dod_awards"] = dod_awards          # read by confirmation.confirm()
                 res["fund"] = out.get("fund"); sentiment = out.get("sentiment")
                 res["orderflow"] = out.get("orderflow")
                 res["filings"] = out.get("filings")
@@ -1981,7 +1992,7 @@ class App:
             res["sentiment"] = sentiment
             try:
                 macro = se.macro_signal(sentiment)
-                tilt = qe.alt_data_tilt(congress, recs, insiders, whale, macro, gov_contracts)
+                tilt = qe.alt_data_tilt(congress, recs, insiders, whale, macro, gov_contracts, dod_awards)
                 if tilt or market: qe.apply_alt_tilt(res, tilt, market)
             except Exception: pass
             seg = build_report_segments(res, res.get("opt"), a["account"], a["risk"])
