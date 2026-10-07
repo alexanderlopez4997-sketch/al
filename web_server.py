@@ -1376,7 +1376,7 @@ function view(v){V=v;document.querySelectorAll('.tab').forEach(t=>t.classList.to
  else if(v==='ah')afterhours_();
  else if(v==='heat'){heatmap_();timer=setInterval(heatmap_,30000);}
  else if(v==='dod')load('/api/dod_awards','dod awards');
- else if(v==='mb')load('/api/morning','morning brief'); else if(v==='tr')load('/api/trackrecord','track record');
+ else if(v==='mb')morning_(); else if(v==='tr')load('/api/trackrecord','track record');
  else if(v==='diag'){loadDiagnostics();timer=setInterval(loadDiagnostics,5000);}
  else if(v==='analyze')$('main').innerHTML='<div class="muted">Type a ticker → Analyze.</div>';}
 async function watchlist_(){$('main').innerHTML='<div class="loader">Loading watchlist categories…</div>';
@@ -1476,6 +1476,15 @@ async function heatmap_(){
   h+=gov.html?gov.html:'<div class="muted">'+(gov.error||'Government contracts unavailable.')+'</div>';
   h+='</section></div>';$('main').innerHTML=h;$('wlnote').textContent='updated '+new Date().toLocaleTimeString();
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+async function morning_(){$('main').innerHTML='<div class="loader">Loading morning brief…</div>';
+ const q='?demo='+demo()+'&tickers='+wl();
+ const get=async u=>{try{const d=await(await fetch(u+q)).json();
+  return d.error?'<div class="card" style="color:var(--sell)">'+d.error+'</div>':d.html;
+ }catch(e){return '<div class="card" style="color:var(--sell)">'+e+'</div>';}};
+ const [mb,gov]=await Promise.all([get('/api/morning'),get('/api/gov_contracts')]);
+ if(V!=='mb')return;
+ $('main').innerHTML='<div class="ahsplit"><section><h2>MORNING BRIEF</h2>'+mb+'</section>'
+  +'<section><h2>GOVERNMENT CONTRACTS</h2>'+gov+'</section></div>';}
 async function afterhours_(){$('main').innerHTML='<div class="loader">Loading after-hours…</div>';
  const q='?demo='+demo()+'&tickers='+wl();
  const get=async u=>{try{const d=await(await fetch(u+q)).json();
