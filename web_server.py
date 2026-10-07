@@ -1412,10 +1412,10 @@ async function afterhours_(){$('main').innerHTML='<div class="loader">Loading af
  const get=async u=>{try{const d=await(await fetch(u+q)).json();
   return d.error?'<div class="card" style="color:var(--sell)">'+d.error+'</div>':d.html;
  }catch(e){return '<div class="card" style="color:var(--sell)">'+e+'</div>';}};
- const [ah,dod]=await Promise.all([get('/api/afterhours'),get('/api/dod_awards')]);
+ const [ah,gov,dod]=await Promise.all([get('/api/afterhours'),get('/api/gov_contracts'),get('/api/dod_awards')]);
  if(V!=='ah')return;
  $('main').innerHTML='<div class="ahsplit"><section><h2>SEC EDGAR NEWS</h2>'+ah+'</section>'
-  +'<section><h2>DOD CONTRACT AWARDS</h2>'+dod+'</section></div>';}
+  +'<section><h2>GOVERNMENT CONTRACTS</h2>'+gov+'<h2 style="margin-top:20px">DOD CONTRACT AWARDS</h2>'+dod+'</section></div>';}
 function newsFilter(cat,btn){
  document.querySelectorAll('.newsbar .filt').forEach(b=>b.classList.toggle('active',b===btn));
  document.querySelectorAll('.newstable tbody tr').forEach(tr=>{
