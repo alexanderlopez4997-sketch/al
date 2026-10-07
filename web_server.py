@@ -1287,7 +1287,9 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  .grid3{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
  .grid2col{display:grid;grid-template-columns:1fr 1fr;gap:20px}
  .ahsplit{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:20px;align-items:start}
+ .ahsplit.even{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
  .ahsplit h2{color:var(--gold);margin:0 0 12px;font-size:16px}
+ .ahsplit.even .scrollbox{max-height:520px;overflow:auto}
  @media(max-width:1000px){.ahsplit{grid-template-columns:minmax(0,1fr)}}
  .heatgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:6px}
  .htile{border-radius:6px;padding:12px 10px;cursor:pointer;color:#fff;border:1px solid rgba(255,255,255,.06);min-height:78px}
@@ -1414,18 +1416,21 @@ async function screenCategory(cat){$('main').innerHTML='<div class="loader">Scre
   const f=document.createElement('iframe');f.srcdoc=d.html;$('main').innerHTML='';$('main').appendChild(f);
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 async function refresh(){$('wlnote').textContent='updating…';
- try{const [d, cats, news, gov]=await Promise.all([
+ try{const [d, cats, ah, gov, dod]=await Promise.all([
   fetch('/api/watchlist?demo='+demo()+'&tickers='+wl()).then(r=>r.json()),
   fetch('/api/categories').then(r=>r.json()),
-  fetch('/api/news?demo='+demo()+'&tickers='+wl()).then(r=>r.json()),
-  fetch('/api/gov_contracts?demo='+demo()+'&tickers='+wl()).then(r=>r.json()).catch(()=>({}))]);
+  fetch('/api/afterhours?demo='+demo()+'&tickers='+wl()).then(r=>r.json()).catch(()=>({})),
+  fetch('/api/gov_contracts?demo='+demo()+'&tickers='+wl()).then(r=>r.json()).catch(()=>({})),
+  fetch('/api/dod_awards?demo='+demo()+'&tickers='+wl()).then(r=>r.json()).catch(()=>({}))]);
   if(!Array.isArray(d)){$('main').innerHTML='<div class="card" style="color:var(--sell)">Watchlist unavailable: '+((d&&d.error)||'unexpected response')+'</div>';$('wlnote').textContent='';return;}
   let h='<div style="padding:0">';
-  h+='<div class="ahsplit" style="margin-bottom:20px"><section><h2>RECENT NEWS & SENTIMENT</h2>';
-  h+=news.html?news.html:'<div class="muted">No news data available.</div>';
-  h+='</section><section><h2>GOVERNMENT CONTRACTS</h2>';
+  h+='<div class="ahsplit even" style="margin-bottom:20px"><section><h2>SEC EDGAR NEWS</h2><div class="scrollbox">';
+  h+=ah.html?ah.html:'<div class="muted">'+(ah.error||'EDGAR news unavailable.')+'</div>';
+  h+='</div></section><section><h2>CONTRACT AWARDS</h2><div class="scrollbox">';
   h+=gov.html?gov.html:'<div class="muted">'+(gov.error||'Government contracts unavailable.')+'</div>';
-  h+='</section></div>';
+  h+='<h2 style="margin-top:20px">DOD CONTRACT AWARDS</h2>';
+  h+=dod.html?dod.html:'<div class="muted">'+(dod.error||'DoD awards unavailable.')+'</div>';
+  h+='</div></section></div>';
   h+='<h2 style="color:var(--gold);margin:0 0 12px;font-size:16px">YOUR WATCHLIST</h2>';
   h+='<div class="wgrid">';for(const r of d){const c=r.tone==='good'?'g':r.tone==='bad'?'b':'n';
    const cc=r.chg>=0?'var(--buy)':'var(--sell)';
