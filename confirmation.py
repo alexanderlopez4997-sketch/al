@@ -134,14 +134,14 @@ def confirm(res):
     passed = sum(1 for _, s, _ in checks if s == "pass")
     checkable = sum(1 for _, s, _ in checks if s != "na")
     if not good:
-        headline = "— not a BUY signal to confirm"
+        headline, level = "— not a BUY signal to confirm", "none"
     elif kills:
-        headline = f"🔴 NOT VERIFIED — {len(kills)} kill-switch(es)"
+        headline, level = f"🔴 NOT VERIFIED — {len(kills)} kill-switch(es)", "kill"
     elif passed >= 5 and checkable and passed / checkable >= 0.7:
-        headline = "✅ VERIFIED — strong confluence"
+        headline, level = "✅ VERIFIED — strong confluence", "verified"
     elif passed >= 3:
-        headline = "🟡 PARTIAL — some confirmation"
+        headline, level = "🟡 PARTIAL — some confirmation", "partial"
     else:
-        headline = "⚪ WEAK — little confirmation"
-    return {"headline": headline, "passed": passed, "checkable": checkable,
+        headline, level = "⚪ WEAK — little confirmation", "weak"
+    return {"headline": headline, "level": level, "passed": passed, "checkable": checkable,
             "checks": checks, "kills": kills}

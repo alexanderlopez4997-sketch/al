@@ -354,6 +354,18 @@ check("confirm flags unresolved high-impact 8-K without killing",
       any(l == "No unresolved high-impact 8-K" and s == "fail" for l, s, _ in cs_hi8k["checks"])
       and not any("8-K" in l for l, _ in cs_hi8k["kills"]))
 
+check("confirm exposes a level for the UI",
+      cs["level"] == "verified" and csk["level"] == "kill" and cf.confirm(dict(verified, verdict={"tone": "bad", "label": "SELL"}))["level"] == "none")
+
+# web_server green-signal banner
+import web_server as _ws
+_banner = _ws._confirmation_html(verified)
+check("web banner shows VERIFIED headline for a confluence BUY", "VERIFIED" in _banner and "signals agree" in _banner)
+_kb = _ws._confirmation_html(dict(killed, filings=[{"form": "424B5", "note": "<b>x</b>", "bias": -1}]))
+check("web banner lists kill-switches, HTML-escaped", "NOT VERIFIED" in _kb and "<b>x</b>" not in _kb)
+check("web banner empty when not a BUY", _ws._confirmation_html(dict(verified, verdict={"tone": "bad", "label": "SELL"})) == "")
+check("web banner never raises on junk", _ws._confirmation_html({}) == "")
+
 # DoD award check: confirms on a meaningful award, n/a on none/noise, never a kill
 dod_ok = dict(verified); dod_ok["dod_awards"] = {"signal": 0.4, "confidence": 0.9, "detail": "$250M DoD award"}
 check("confirm passes DoD award check on a meaningful award",
