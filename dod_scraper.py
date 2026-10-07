@@ -28,6 +28,7 @@ Example:
       sig = dod_award_signal(award, ticker="RTX", market_cap=65e9)
 """
 
+import math
 import re
 import logging
 import os
@@ -411,12 +412,22 @@ _UNIT = {"billion": 1e9, "million": 1e6, "thousand": 1e3}
 # outweigh a $200M definite contract. A judgment call, not backtested — tune freely.
 CEILING_WEIGHT = 0.10
 
-# Counted award value as a fraction of the contractor's market cap that earns a FULL +1.0
-# signal; smaller awards scale linearly below it. 0.1% of market cap = full signal (so a
-# $65M award to a $65B company, or $1B to a $1T one, maxes out). Set to 1.0 to get the old
-# behavior: signal = the raw award/market-cap ratio, the same convention as
-# contracts.contract_signal() (the Quiver gov-contracts signal).
-DOD_FULL_SIGNAL_RATIO = 0.001
+# Signal curve: counted award value as a fraction of the contractor's market cap, in units of
+# DOD_SIGNAL_RATIO_UNIT (0.1%), mapped through a log curve that reaches a FULL +1.0 at
+# DOD_SIGNAL_FULL_UNITS units (0.5% of market cap):
+#     signal = ln(1 + ratio/UNIT) / ln(1 + FULL_UNITS)
+# Smooth and concave, so awards well under full size still register (0.01% -> 0.05,
+# 0.05% -> 0.23, 0.1% -> 0.39, 0.2% -> 0.61) while a giant outlier can't dominate: anything
+# at or above 0.5% of market cap is simply "maxed out".
+DOD_SIGNAL_RATIO_UNIT = 0.001
+DOD_SIGNAL_FULL_UNITS = 5.0
+
+
+def _dod_signal_curve(ratio):
+    """Counted-value / market-cap ratio -> signal in [0, 1] (0 for a non-positive ratio)."""
+    if ratio <= 0:
+        return 0.0
+    return min(1.0, math.log1p(ratio / DOD_SIGNAL_RATIO_UNIT) / math.log1p(DOD_SIGNAL_FULL_UNITS))
 
 
 def _first_amount(text):
@@ -836,9 +847,9 @@ def dod_award_signal(award, ticker=None, market_cap=None, ttm_revenue=None):
     if fundamentals is None or fundamentals <= 0:
         return None
 
-    # Signal: counted value vs. market cap, saturating at DOD_FULL_SIGNAL_RATIO (not a noise
-    # floor: this is the size at which the signal is already maxed out).
-    signal = float(np.clip(counted / fundamentals / DOD_FULL_SIGNAL_RATIO, -1, 1))
+    # Signal: counted value vs. market cap through the saturating log curve (see
+    # DOD_SIGNAL_RATIO_UNIT). Not a noise floor: small awards give small, not zero, signals.
+    signal = _dod_signal_curve(counted / fundamentals)
 
     # Confidence: counted value ($100M = full) x freshness (DoD awards are TODAY, so no
     # decay yet). Not also scaled by vehicle_weight: a ceiling's discount is already in
@@ -859,7 +870,7 @@ def dod_award_signal(award, ticker=None, market_cap=None, ttm_revenue=None):
     return {"signal": signal, "confidence": float(confidence), "detail": detail}
 
 
-def enhanced_dod_award_signal(award_record, market_cap):
+def refined_dod_award_signal(award_record, market_cap):
     """(signal, confidence) for one award, using its realized economic value rather than
     the raw ceiling. (0.0, 0.0) when there is no market cap or nothing counts — an explicit
     zero (a ceiling with no funds obligated at award) stays zero; it does NOT fall back to
@@ -879,6 +890,9 @@ def enhanced_dod_award_signal(award_record, market_cap):
                    value_kind=fin["kind"], obligated_usd=fin["obligated_value"])
     sig = dod_award_signal(rec, market_cap=market_cap)
     return (sig["signal"], sig["confidence"]) if sig else (0.0, 0.0)
+
+
+enhanced_dod_award_signal = refined_dod_award_signal   # earlier name, kept so existing callers don't break
 
 
 def _combined_award(awards, ticker):
