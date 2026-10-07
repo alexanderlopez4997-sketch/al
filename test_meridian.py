@@ -1071,6 +1071,48 @@ check("DoD dod_signal_for_ticker None for no match / no market cap",
       dod_scraper.dod_signal_for_ticker(_dod_awards, "ZZZZ", 1e9) is None
       and dod_scraper.dod_signal_for_ticker(_dod_awards, "LMT", None) is None)
 
+# ---- ticker mapping: token-based matching (no raw-substring false positives)
+_m = dod_scraper._contractor_to_ticker
+for _name, _want in [
+    ("Lockheed Martin Corp.", "LMT"), ("The Boeing Co.", "BA"), ("LOCKHEED MARTIN", "LMT"),
+    ("Raytheon Co.", "RTX"), ("Raytheon Technologies", "RTX"), ("Pratt & Whitney", "RTX"),
+    ("Sikorsky Aircraft Corp.", "LMT"), ("General Dynamics Electric Boat", "GD"),
+    ("Huntington Ingalls Inc.", "HII"), ("Northrop Grumman Systems Corp.", "NOC"),
+    ("L3Harris Technologies", "LHX"), ("L3", "LHX"), ("BWX Technologies", "BWXT"), ("BWX", "BWXT"),
+    ("AAI Corp.", "TXT"), ("Bell Textron Inc.", "TXT"), ("Spirit AeroSystems", "BA"),
+    ("Sturm, Ruger & Co., Inc.", "RGR"), ("Curtiss-Wright Corp.", "CW"), ("AT&T Corp.", "T"),
+    ("Booz Allen Hamilton Inc.", "BAH"), ("Amazon Web Services Inc.", "AMZN"),
+    ("Sikorsky Aircraft Corp., a Lockheed Martin Co.", "LMT"),
+    ("Joint venture of Lockheed Martin Corp. and Raytheon", "LMT"),   # multi-word alias matches mid-name
+]:
+    check(f"DoD map: {_name!r} -> {_want}", _m(_name) == _want)
+# General Dynamics vs General Electric must not collide on the shared first word
+check("DoD map: General Electric -> GE, not GD", _m("General Electric Co.") == "GE")
+check("DoD map: General Dynamics -> GD, not GE", _m("General Dynamics Corp.") == "GD")
+# raw-substring false positives the old matcher produced
+check("DoD map: 'Saxon Industries' is not Axon", _m("Saxon Industries Inc.") is None)
+check("DoD map: 'Hawaiian Airlines' is not AAI", _m("Hawaiian Airlines Inc.") is None)
+check("DoD map: lone short word mid-name doesn't match", _m("Smith Oracle Consulting") is None)
+check("DoD map: empty / None / junk -> None", _m("") is None and _m(None) is None and _m("!!!") is None)
+# explicit None (private / foreign / JV) is a definite answer that beats shorter aliases
+check("DoD map: Bell Boeing JV -> None, not BA", _m("Bell Boeing Joint Project Office") is None)
+check("DoD map: private firm -> None", _m("General Atomics Aeronautical Systems") is None)
+check("DoD map: delisted Triumph -> None", _m("Triumph Group Inc.") is None)
+check("DoD map: the AAI-is-Northrop bug is gone", dod_scraper.CONTRACTOR_TICKER_MAP["AAI"] == "TXT")
+check("DoD map: every mapped ticker is a plain upper-case symbol",
+      all(v is None or (v.replace(".", "").isalnum() and v == v.upper())
+          for v in dod_scraper.CONTRACTOR_TICKER_MAP.values()))
+_unm = dod_scraper.unmapped_contractors([
+    {"contractor": "Acme Rocketry", "ticker": None, "value_usd": 200e6},
+    {"contractor": "Acme Rocketry", "ticker": None, "value_usd": 100e6},
+    {"contractor": "Tiny Co", "ticker": None, "value_usd": 1e6},
+    {"contractor": "General Atomics", "ticker": None, "value_usd": 900e6},      # known private
+    {"contractor": "Boeing", "ticker": "BA", "value_usd": 900e6},               # mapped
+    {"contractor": "Unknown", "ticker": None, "value_usd": 900e6},
+])
+check("DoD unmapped_contractors lists only big, never-seen names (totalled)",
+      _unm == [("Acme Rocketry", 300e6)])
+
 _cron = dod_scraper.schedule_dod_scraper()
 check("DoD scheduler returns cron expression (5pm ET, weekdays)", "0 17" in _cron and "1-5" in _cron)
 
