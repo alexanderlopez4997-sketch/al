@@ -1234,6 +1234,13 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  .ahsplit{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:20px;align-items:start}
  .ahsplit h2{color:var(--gold);margin:0 0 12px;font-size:16px}
  @media(max-width:1000px){.ahsplit{grid-template-columns:minmax(0,1fr)}}
+ .heatgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:6px}
+ .htile{border-radius:6px;padding:12px 10px;cursor:pointer;color:#fff;border:1px solid rgba(255,255,255,.06);min-height:78px}
+ .htile:hover{outline:2px solid var(--gold)}
+ .htile .t{font-size:16px;font-weight:800}.htile .c{font-family:ui-monospace,monospace;font-size:14px;margin-top:4px}
+ .htile .s{font-size:10px;opacity:.8;margin-top:4px;letter-spacing:.5px}
+ .heatkey{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--dim);margin-bottom:10px}
+ .heatkey i{display:inline-block;width:18px;height:10px;border-radius:2px}
  .ohcard{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:12px;margin-bottom:10px}
  .ohh{display:flex;justify-content:space-between;margin-bottom:6px}.tagpill{font-size:11px;color:var(--amber)}
  .sub{font-size:12px;color:var(--dim);margin-top:3px}.sub a{color:var(--blue,#4F9DE0)}.stat{font-family:ui-monospace,monospace}
@@ -1296,6 +1303,7 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
     <button class="tab" data-v="watchlist" onclick="view('watchlist')">Watchlists</button>
     <button class="tab" data-v="mlscreen" onclick="view('mlscreen')">ML Screener</button>
     <button class="tab" data-v="diag" onclick="view('diag')">Diagnostics</button>
+    <button class="tab" data-v="heat" onclick="view('heat')">Heat Map</button>
     <button class="tab" data-v="ah" onclick="view('ah')">After-Hours</button>
     <button class="tab" data-v="dod" onclick="view('dod')">DoD Awards</button>
     <button class="tab" data-v="mb" onclick="view('mb')">Morning</button>
@@ -1323,11 +1331,12 @@ function clock(){const n=new Date(new Date().toLocaleString('en-US',{timeZone:'A
  $('stream').style.color=live?'var(--buy)':'var(--dim)';}
 setInterval(clock,1000);clock();
 function view(v){V=v;document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.v===v));
- $('wlrow').style.display=(v==='dash'||v==='ah'||v==='dod'||v==='mb')?'flex':'none';
+ $('wlrow').style.display=(v==='dash'||v==='heat'||v==='ah'||v==='dod'||v==='mb')?'flex':'none';
  if(timer){clearInterval(timer);timer=null;}
  if(v==='dash'){refresh();timer=setInterval(refresh,30000);}
  else if(v==='screen')screen_(); else if(v==='watchlist')watchlist_(); else if(v==='mlscreen')mlscreen_();
  else if(v==='ah')afterhours_();
+ else if(v==='heat'){heatmap_();timer=setInterval(heatmap_,30000);}
  else if(v==='dod')load('/api/dod_awards','dod awards');
  else if(v==='mb')load('/api/morning','morning brief'); else if(v==='tr')load('/api/trackrecord','track record');
  else if(v==='diag'){loadDiagnostics();timer=setInterval(loadDiagnostics,5000);}
@@ -1407,6 +1416,27 @@ function drawChart(bars){const el=$('chart');if(!el||!window.LightweightCharts||
 async function load(url,name){$('main').innerHTML='<div class="loader">Loading '+name+'…</div>';
  try{const d=await(await fetch(url+'?demo='+demo()+'&tickers='+wl())).json();
   $('main').innerHTML=d.error?'<div class="card" style="color:var(--sell)">'+d.error+'</div>':d.html;
+ }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+async function heatmap_(){
+ if(!$('main').querySelector('.heatgrid'))$('main').innerHTML='<div class="loader">Loading heat map…</div>';
+ try{const q='?demo='+demo()+'&tickers='+wl();
+  const [d,gov]=await Promise.all([
+   fetch('/api/watchlist'+q).then(r=>r.json()),
+   fetch('/api/gov_contracts'+q).then(r=>r.json()).catch(()=>({}))]);
+  if(V!=='heat')return;
+  if(!Array.isArray(d)){$('main').innerHTML='<div class="card" style="color:var(--sell)">Watchlist unavailable: '+((d&&d.error)||'unexpected response')+'</div>';return;}
+  const col=c=>{const a=Math.min(Math.abs(c)/3,1);return c>=0?`rgba(46,204,143,${0.15+0.65*a})`:`rgba(255,84,73,${0.15+0.65*a})`;};
+  let h='<div class="ahsplit"><section><h2>HEAT MAP</h2>';
+  h+='<div class="heatkey"><i style="background:rgba(255,84,73,.8)"></i>−3%<i style="background:rgba(255,255,255,.12)"></i>0<i style="background:rgba(46,204,143,.8)"></i>+3% · colored by daily change</div>';
+  h+='<div class="heatgrid">';
+  for(const r of [...d].sort((a,b)=>b.chg-a.chg)){
+   h+=`<div class="htile" style="background:${col(r.chg)}" onclick="$('tk').value='${r.ticker}';view('analyze');go()">
+    <div class="t">${r.ticker} <span style="color:var(--amber)">${r.whale}</span></div>
+    <div class="c">${r.chg>=0?'+':''}${r.chg}%</div>
+    <div class="s">${r.last} · score ${r.score>0?'+':''}${r.score}</div></div>`;}
+  h+='</div></section><section><h2>GOVERNMENT CONTRACTS</h2>';
+  h+=gov.html?gov.html:'<div class="muted">'+(gov.error||'Government contracts unavailable.')+'</div>';
+  h+='</section></div>';$('main').innerHTML=h;$('wlnote').textContent='updated '+new Date().toLocaleTimeString();
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 async function afterhours_(){$('main').innerHTML='<div class="loader">Loading after-hours…</div>';
  const q='?demo='+demo()+'&tickers='+wl();
