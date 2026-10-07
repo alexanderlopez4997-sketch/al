@@ -45,32 +45,210 @@ logger = logging.getLogger("dod_scraper")
 DOD_CONTRACTS_URL = "https://www.defense.gov/News/Releases/?Category=Contracts"
 DOD_UA = {"User-Agent": "Meridian Research meridian-app contact@example.com"}
 
-# Fuzzy contractor name → ticker mapping (built up over time)
+# Contractor name -> ticker. Keys are matched on normalised word tokens (see
+# _contractor_to_ticker), so write them without legal suffixes (Inc/Corp/Co/LLC).
+# A value of None means "known, but no tradeable US ticker" (private, foreign, or a
+# joint venture) — it is an explicit answer, and wins over any shorter alias that
+# would otherwise match (e.g. "Bell Boeing" must not fall through to Boeing).
 CONTRACTOR_TICKER_MAP = {
-    # Aerospace & Defense (Big 5)
+    # --- Aerospace & defense primes
     "Lockheed Martin": "LMT",
+    "Sikorsky": "LMT",
+    "Terran Orbital": "LMT",
     "Northrop Grumman": "NOC",
+    "Orbital ATK": "NOC",
     "General Dynamics": "GD",
+    "GDIT": "GD",
+    "Electric Boat": "GD",
+    "Bath Iron Works": "GD",
+    "Gulfstream Aerospace": "GD",
+    "NASSCO": "GD",
+    "National Steel and Shipbuilding": "GD",
+    "BlueHalo": "GD",
+    "Raytheon": "RTX",
     "Raytheon Technologies": "RTX",
+    "RTX": "RTX",
+    "Collins Aerospace": "RTX",
+    "Rockwell Collins": "RTX",
+    "Pratt & Whitney": "RTX",
     "Boeing": "BA",
-    # Primes (mid-cap)
+    "Insitu": "BA",
+    "Spirit AeroSystems": "BA",        # acquired by Boeing 2025-12-08 (SPR delisted)
+    "Short Brothers": "BA",
+    "L3Harris": "LHX",
+    "L3 Harris": "LHX",
+    "L3 Technologies": "LHX",
+    "L3": "LHX",                       # _extract_contractor strips " Technologies"
+    "Aerojet Rocketdyne": "LHX",
+    "Huntington Ingalls": "HII",
+    "Newport News Shipbuilding": "HII",
+    "Ingalls Shipbuilding": "HII",
     "Textron": "TXT",
-    "L3Harris Technologies": "LHX",
-    "Huntington Ingalls Industries": "HII",
-    "Spirit AeroSystems": "SPR",
-    "Triumph Group": "TGI",
+    "Bell Textron": "TXT",
+    "Bell Helicopter": "TXT",
+    "Cessna": "TXT",
+    "Beechcraft": "TXT",
+    "AAI": "TXT",                      # AAI Corp is a Textron Systems company
+    "General Electric": "GE",
+    "GE Aerospace": "GE",
+    "GE Aviation": "GE",
+    "GE Vernova": "GEV",
+    "Honeywell": "HON",
+    "Leonardo DRS": "DRS",
+    "BWX Technologies": "BWXT",
+    "BWXT": "BWXT",
+    "BWX": "BWXT",                     # _extract_contractor strips " Technologies"
+    "Babcock & Wilcox Nuclear Operations": "BWXT",
+    "Babcock & Wilcox": "BW",
+    "Oshkosh": "OSK",
+    "AeroVironment": "AVAV",
+    "Kratos": "KTOS",
+    "Mercury Systems": "MRCY",
+    "Curtiss-Wright": "CW",
+    "HEICO": "HEI",
+    "TransDigm": "TDG",
+    "Ducommun": "DCO",
+    "Hexcel": "HXL",
+    "Woodward": "WWD",
+    "Howmet": "HWM",
+    "Astronics": "ATRO",
+    "National Presto": "NPK",
+    "Smith & Wesson": "SWBI",
+    "Sturm, Ruger": "RGR",
+    "Olin": "OLN",
+    "Cadre Holdings": "CDRE",
     "Axon": "AXON",
-    # Tech contractors
+    # --- Space
+    "Rocket Lab": "RKLB",
+    "Redwire": "RDW",
+    "Viasat": "VSAT",
+    "Iridium": "IRDM",
+    # --- Services / IT integrators
+    "Leidos": "LDOS",
+    "Science Applications International": "SAIC",
+    "SAIC": "SAIC",
+    "CACI": "CACI",
+    "Booz Allen Hamilton": "BAH",
+    "KBR": "KBR",
+    "Parsons": "PSN",
+    "Fluor": "FLR",
+    "Jacobs": "J",
+    "AECOM": "ACM",
+    "Tetra Tech": "TTEK",
+    "Amentum": "AMTM",
+    "V2X": "VVX",
+    "Vectrus": "VVX",
+    "Maximus": "MMS",
+    "ICF": "ICFI",
+    "Unisys": "UIS",
+    "Telos": "TLS",
+    "Accenture Federal Services": "ACN",
+    # --- Big tech / telecom
     "Microsoft": "MSFT",
     "Amazon": "AMZN",
     "Google": "GOOGL",
-    "Palantir Technologies": "PLTR",
-    # Subcontractors & smaller
-    "General Atomics": None,  # Private
-    "Sierra Nevada": None,  # Private
-    "AAI": "NOC",  # Northrop subsidiary
-    "Collins Aerospace": "RTX",  # Raytheon division
+    "Alphabet": "GOOGL",
+    "Oracle": "ORCL",
+    "International Business Machines": "IBM",
+    "IBM": "IBM",
+    "Dell": "DELL",
+    "Cisco Systems": "CSCO",
+    "Palantir": "PLTR",
+    "Verizon": "VZ",
+    "AT&T": "T",
+    "Lumen": "LUMN",
+    # --- Health / logistics (TRICARE, medical supply)
+    "Humana Military": "HUM",
+    "Health Net Federal Services": "CNC",
+    "UnitedHealth": "UNH",
+    "Optum": "UNH",
+    "Cardinal Health": "CAH",
+    "McKesson": "MCK",
+    "Cencora": "COR",
+    "AmerisourceBergen": "COR",
+    # --- Known, but no tradeable US ticker (private / foreign / joint venture)
+    "General Atomics": None,
+    "Sierra Nevada": None,
+    "Anduril": None,
+    "SpaceX": None,
+    "Peraton": None,
+    "ManTech": None,
+    "Triumph Group": None,             # taken private 2025-07 (TGI delisted)
+    "BAE Systems": None,               # UK-listed
+    "Bell Boeing": None,               # Textron/Boeing joint venture
+    "United Launch Alliance": None,    # Lockheed/Boeing joint venture
+    "Javelin Joint Venture": None,     # Raytheon/Lockheed joint venture
 }
+
+# Legal-form tokens carry no identity: "The Boeing Co." == "Boeing".
+_LEGAL_TOKENS = frozenset({"the", "inc", "incorporated", "corp", "corporation", "co",
+                           "company", "llc", "lp", "llp", "ltd", "limited", "plc"})
+
+
+def _name_tokens(name):
+    """'Pratt & Whitney Corp.' -> ['pratt', 'and', 'whitney']. Lowercased, punctuation
+    folded to word breaks ('&' -> 'and'), legal-form tokens dropped."""
+    s = str(name).lower().replace("&", " and ")
+    s = re.sub(r"['\u2019.]", "", s)           # "L3Harris." / "Ruger's" -> no stray breaks
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return [t for t in s.split() if t not in _LEGAL_TOKENS]
+
+
+def _lookup(contractor_name):
+    """-> (matched, ticker). `matched` is True for ANY alias hit, including the
+    explicit-None ones (private/foreign/JV), so callers can tell "known, no
+    ticker" from "never heard of it".
+
+    Matching is on whole word tokens against CONTRACTOR_TICKER_MAP, never raw
+    substrings (so "Saxon Industries" can't hit "Axon", nor "Hawaiian ..." hit "AAI").
+    Rules, in priority order:
+      1. An alias at the START of the name beats one found later in it.
+      2. Multi-word aliases ("Lockheed Martin", "General Dynamics") also match
+         mid-name ("... a Lockheed Martin Co."); one-word aliases must lead the
+         name — a lone common word buried mid-name is too weak to trust.
+      3. Longer alias beats shorter ("Bell Boeing" -> None beats "Boeing" -> BA;
+         "General Dynamics" never collides with "General Electric").
+    A None-valued alias is a definite answer (private/foreign/JV) and is returned
+    as None rather than falling through to a shorter alias."""
+    if not contractor_name:
+        return False, None
+    toks = _name_tokens(contractor_name)
+    if not toks:
+        return False, None
+    best = None                                  # (rank, ticker)
+    for alias, ticker in CONTRACTOR_TICKER_MAP.items():
+        a = _name_tokens(alias)
+        n = len(a)
+        if not n or n > len(toks):
+            continue
+        for i in range(len(toks) - n + 1):
+            if toks[i:i + n] != a:
+                continue
+            if i > 0 and n == 1:
+                continue                         # rule 2
+            rank = (i == 0, n, -i)
+            if best is None or rank > best[0]:
+                best = (rank, ticker)
+    return (True, best[1]) if best else (False, None)
+
+
+def _contractor_to_ticker(contractor_name):
+    """Map a contractor name to a ticker, or None. See _lookup() for the rules."""
+    return _lookup(contractor_name)[1]
+
+
+def unmapped_contractors(awards, min_value=50e6):
+    """Contractors with a big award but no ticker — the to-do list for growing
+    CONTRACTOR_TICKER_MAP. Returns [(contractor, total_value_usd)], biggest first.
+    Firms deliberately mapped to None (private/foreign/JV) are not listed — map a
+    private contractor to None to silence it."""
+    totals = {}
+    for a in awards or []:
+        name = a.get("contractor") or "Unknown"
+        if a.get("ticker") or name.lower() == "unknown" or _lookup(name)[0]:
+            continue
+        totals[name] = totals.get(name, 0.0) + float(a.get("value_usd") or 0)
+    return sorted(((n, v) for n, v in totals.items() if v >= min_value), key=lambda x: -x[1])
 
 
 class DODReleaseParser(HTMLParser):
@@ -212,31 +390,6 @@ def _extract_contractor(text):
     return None
 
 
-def _contractor_to_ticker(contractor_name):
-    """Map contractor name to ticker symbol.
-
-    Uses CONTRACTOR_TICKER_MAP with fuzzy matching fallback."""
-    if not contractor_name:
-        return None
-
-    # Exact match
-    if contractor_name in CONTRACTOR_TICKER_MAP:
-        return CONTRACTOR_TICKER_MAP[contractor_name]
-
-    # Case-insensitive match
-    for name, ticker in CONTRACTOR_TICKER_MAP.items():
-        if name.lower() == contractor_name.lower():
-            return ticker
-
-    # Fuzzy: check if contractor name is substring of key (or vice versa)
-    contractor_lower = contractor_name.lower()
-    for name, ticker in CONTRACTOR_TICKER_MAP.items():
-        if contractor_lower in name.lower() or name.lower() in contractor_lower:
-            return ticker
-
-    return None
-
-
 def dod_daily_awards(html=None, url=None, timeout=15):
     """Fetch and parse DoD daily contract awards.
 
@@ -290,6 +443,9 @@ def dod_daily_awards(html=None, url=None, timeout=15):
             "description": article["body"][:500],  # first 500 chars
         })
 
+    for name, total in unmapped_contractors(awards, min_value=100e6):
+        logger.info("unmapped DoD contractor %r ($%.0fM) — add to CONTRACTOR_TICKER_MAP "
+                    "(or map to None if private)", name, total / 1e6)
     return awards
 
 
