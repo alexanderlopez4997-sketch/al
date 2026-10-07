@@ -798,23 +798,25 @@ def _dod_awards_html(demo):
         sentiment_color = "#2ECC8F" if sentiment == "bullish" else "#FF5449" if sentiment == "bearish" else "#E0A83B"
         signal = award.get("signal")
         conf = award.get("confidence")
-        score_txt = (f"🎯 signal {signal:+.2f} · confidence {conf:.0%}"
+        score_txt = (f'🎯 signal <span style="color:#B15CDE">{signal:+.2f}</span> · confidence {conf:.0%}'
                      if signal is not None and conf is not None else "🎯 signal n/a (no ticker/market cap)")
 
-        rows += (f'<div class="ohcard">'
+        rows += (f'<div class="ohcard" style="border-left:3px solid #B15CDE">'
                 f'<div class="ohh">'
-                f'<b>{_html.escape(ticker)} · {_html.escape(contractor)}</b>'
-                f'<span class="tagpill" style="color:{sentiment_color};">{sentiment.upper()}</span>'
+                f'<b style="color:#B15CDE">{_html.escape(ticker)}</b> <span style="color:#9B4BCC">·</span> <span style="color:#A8D8EA">{_html.escape(contractor)}</span>'
+                f'<span class="tagpill" style="color:{sentiment_color};background:rgba({sentiment_color.lstrip("#")},0.1);">{sentiment.upper()}</span>'
                 f'</div>'
-                f'<div class="sub">{_fmt_usd_k(value)} · {_html.escape(desc)}</div>'
-                f'<div class="stat" style="margin-top:8px;font-size:12px">'
+                f'<div class="sub" style="color:#B8C5D6">{_fmt_usd_k(value)} · {_html.escape(desc)}</div>'
+                f'<div class="stat" style="margin-top:8px;font-size:12px;color:#9B9FAE">'
                 f'📅 {date_str} · {score_txt}'
                 f'</div></div>')
 
     summary = f'{len(awards)} award{"s" if len(awards) != 1 else ""} · {_fmt_usd_k(total_value)} total value'
-    return {"html": f'<div class="stat">{summary}</div><div class="grid3" style="margin-top:16px">{rows}</div>'
-            + '<div class="muted" style="margin-top:14px">Real-time DoD contract awards from defense.gov, scored by '
-              'contractor market cap. Bullish/bearish sentiment reflects 1-day news coverage of the contractor.</div>'}
+    return {"html": f'<div class="stat" style="color:#B15CDE;font-weight:700">⚔️ DoD Contract Intelligence</div>'
+            f'<div class="stat" style="color:#A8D8EA;font-size:14px;margin-bottom:16px">{summary}</div>'
+            f'<div class="grid3" style="margin-top:12px">{rows}</div>'
+            + '<div class="muted" style="margin-top:16px;color:#8B95A8;font-size:13px">Real-time defense.gov contract awards, scored by '
+              'contractor market cap. Sentiment reflects 1-day news coverage.</div>'}
 
 
 # ------------------------------------------------------------ track record ---
@@ -1203,6 +1205,7 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
     <button class="tab" data-v="mlscreen" onclick="view('mlscreen')">ML Screener</button>
     <button class="tab" data-v="diag" onclick="view('diag')">Diagnostics</button>
     <button class="tab" data-v="ah" onclick="view('ah')">After-Hours</button>
+    <button class="tab" data-v="dod" onclick="view('dod')">DoD Awards</button>
     <button class="tab" data-v="mb" onclick="view('mb')">Morning</button>
     <button class="tab" data-v="tr" onclick="view('tr')">Track Record</button>
   </div>
@@ -1228,11 +1231,12 @@ function clock(){const n=new Date(new Date().toLocaleString('en-US',{timeZone:'A
  $('stream').style.color=live?'var(--buy)':'var(--dim)';}
 setInterval(clock,1000);clock();
 function view(v){V=v;document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.v===v));
- $('wlrow').style.display=(v==='dash'||v==='ah'||v==='mb')?'flex':'none';
+ $('wlrow').style.display=(v==='dash'||v==='ah'||v==='dod'||v==='mb')?'flex':'none';
  if(timer){clearInterval(timer);timer=null;}
  if(v==='dash'){refresh();timer=setInterval(refresh,30000);}
  else if(v==='screen')screen_(); else if(v==='watchlist')watchlist_(); else if(v==='mlscreen')mlscreen_();
  else if(v==='ah')load('/api/afterhours','after-hours');
+ else if(v==='dod')load('/api/dod_awards','dod awards');
  else if(v==='mb')load('/api/morning','morning brief'); else if(v==='tr')load('/api/trackrecord','track record');
  else if(v==='diag'){loadDiagnostics();timer=setInterval(loadDiagnostics,5000);}
  else if(v==='analyze')$('main').innerHTML='<div class="muted">Type a ticker → Analyze.</div>';}
