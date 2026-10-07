@@ -311,6 +311,36 @@ with unittest.mock.patch.object(edgar, "_load_ciks", return_value={"AAPL": "0000
     _r = fe.analyze_quarterly_earnings("aapl", use_cache=False)
     check("analyze_quarterly_earnings: end-to-end with mocked SEC", _r["status"] == "success" and _r["ticker"] == "AAPL")
 
+# --- fiscal Q4 is not in any 10-Q: derive it from the 10-K full year minus the 9-month YTD
+def _fy(year, q, q4_total):
+    """Calendar-year company: Q1-Q3 10-Q quarters + 9M YTD row, plus a 10-K full year."""
+    rows = [_q(f"{year}-01-01", f"{year}-03-31", q[0], filed=f"{year}-05-01"),
+            _q(f"{year}-04-01", f"{year}-06-30", q[1], filed=f"{year}-08-01"),
+            _q(f"{year}-07-01", f"{year}-09-30", q[2], filed=f"{year}-11-01"),
+            _q(f"{year}-01-01", f"{year}-09-30", sum(q), filed=f"{year}-11-01")]
+    if q4_total is not None:
+        rows.append(_q(f"{year}-01-01", f"{year}-12-31", sum(q) + q4_total, form="10-K", filed=f"{year + 1}-02-01"))
+    return rows
+_fy_facts = lambda cur_q4: {"facts": {"us-gaap": {"Revenues": {"units": {"USD":
+    _fy(2024, (100, 110, 120), 140) + _fy(2025, (130, 140, 150), cur_q4)}}}}}
+_e4 = fe.earnings_from_facts(_fy_facts(180))
+check("fiscal Q4: derived quarter becomes the anchor", _e4["period_end"] == "2025-12-31" and _e4["derived_q4"])
+check("fiscal Q4: revenue = FY - 9M YTD", _e4["revenue"] == 180)
+check("fiscal Q4: YoY vs prior derived Q4", abs(_e4["revenue_yoy"] - (180 - 140) / 140) < 1e-9)
+check("fiscal Q4: QoQ vs Q3", abs(_e4["revenue_qoq"] - (180 - 150) / 150) < 1e-9)
+_e3 = fe.earnings_from_facts(_fy_facts(None))
+check("fiscal Q4: 10-K not yet filed -> latest 10-Q quarter", _e3["period_end"] == "2025-09-30" and not _e3["derived_q4"])
+_no_ytd = _fy_facts(180)
+_no_ytd["facts"]["us-gaap"]["Revenues"]["units"]["USD"] = [
+    r for r in _no_ytd["facts"]["us-gaap"]["Revenues"]["units"]["USD"]
+    if not (r["form"] == "10-Q" and r["end"] == "2025-09-30" and r["start"] == "2025-01-01")]
+check("fiscal Q4: missing 9M YTD row -> no Q4 derived, falls back to Q3",
+      fe.earnings_from_facts(_no_ytd)["period_end"] == "2025-09-30")
+_wk = {"facts": {"us-gaap": {"Revenues": {"units": {"USD": [      # 52-week FY (Apple-style, ends late Sept)
+    _q("2024-09-29", "2025-06-28", 700), _q("2025-03-30", "2025-06-28", 230, filed="2025-08-01"),
+    _q("2024-09-29", "2025-09-27", 1000, form="10-K", filed="2025-10-31")]}}}}}
+check("fiscal Q4: 52-week year derives from its 9M YTD", fe.earnings_from_facts(_wk)["revenue"] == 300)
+
 # ------------------------------------------------------------- sentiment ----
 section("sentiment_engine")
 s, hits = se.score_text("earnings beat, strong growth and record profit surge")

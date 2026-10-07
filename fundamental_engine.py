@@ -245,6 +245,8 @@ _REVENUE_CONCEPTS = ("Revenues", "RevenueFromContractWithCustomerExcludingAssess
 _NET_INCOME_CONCEPTS = ("NetIncomeLoss", "ProfitLoss")
 _OP_INCOME_CONCEPTS = ("OperatingIncomeLoss",)
 _QUARTER_DAYS = (70, 105)        # a single fiscal quarter; 10-Qs also carry 6/9-month YTD rows
+_NINE_MONTH_DAYS = (250, 290)    # Q1-Q3 year-to-date row in the Q3 10-Q
+_FISCAL_YEAR_DAYS = (350, 380)   # 52/53-week and calendar fiscal years
 EARNINGS_CACHE_PREFIX = "q10"
 
 
@@ -252,29 +254,48 @@ def _days(start, end):
     return (date.fromisoformat(end) - date.fromisoformat(start)).days
 
 
+def _latest_by(rows, keyfn, form_prefix, day_range):
+    """{key: (val, filed, row)} for rows of the given form whose period length is in
+    day_range; when a period was reported in several filings the latest filing wins
+    (picks up restatements)."""
+    out = {}
+    for r in rows:
+        try:
+            if not str(r.get("form", "")).startswith(form_prefix) or r.get("val") is None:
+                continue
+            if not day_range[0] <= _days(r["start"], r["end"]) <= day_range[1]:
+                continue
+            k = keyfn(r)
+            if k not in out or r.get("filed", "") >= out[k][1]:
+                out[k] = (float(r["val"]), r.get("filed", ""), r)
+        except (KeyError, ValueError, TypeError):
+            continue
+    return out
+
+
 def _quarterly_series(facts, concepts):
-    """{period_end: (value, period_start)} for single-quarter 10-Q facts under the concept
-    with the most recent quarter. When a period was reported in several filings, the
-    latest filing wins (picks up restatements)."""
+    """{period_end: (value, period_start, derived)} of single quarters under the concept
+    with the most recent quarter. 10-Qs only report Q1-Q3, so each fiscal Q4 is derived
+    as the 10-K full-year value minus the nine-month YTD in that year's Q3 10-Q
+    (`derived=True`); without the YTD row there is no Q4 and the series stops at Q3."""
     best = {}
     gaap = (facts or {}).get("facts", {}).get("us-gaap", {})
     for concept in concepts:
         rows = gaap.get(concept, {}).get("units", {}).get("USD", [])
-        cur = {}
-        for r in rows:
-            try:
-                if not str(r.get("form", "")).startswith("10-Q") or r.get("val") is None:
-                    continue
-                if not _QUARTER_DAYS[0] <= _days(r["start"], r["end"]) <= _QUARTER_DAYS[1]:
-                    continue
-                if r["end"] not in cur or r.get("filed", "") >= cur[r["end"]][2]:
-                    cur[r["end"]] = (float(r["val"]), r["start"], r.get("filed", ""))
-            except (KeyError, ValueError, TypeError):
+        cur = {end: (v, r["start"], False) for end, (v, _, r) in
+               _latest_by(rows, lambda r: r["end"], "10-Q", _QUARTER_DAYS).items()}
+        ytd9 = _latest_by(rows, lambda r: r["start"], "10-Q", _NINE_MONTH_DAYS)
+        for (start, end), (annual, _, _) in _latest_by(
+                rows, lambda r: (r["start"], r["end"]), "10-K", _FISCAL_YEAR_DAYS).items():
+            nine = ytd9.get(start)
+            # the YTD must end ~one quarter before the fiscal year does, else it's another year's row
+            if end in cur or not nine or not 60 <= _days(nine[2]["end"], end) <= 120:
                 continue
+            cur[end] = (annual - nine[0], start, True)
         # companies switch revenue tags over time: prefer the tag with the freshest quarter
         if cur and (not best or max(cur) > max(best)):
             best = cur
-    return {end: (v[0], v[1]) for end, v in best.items()}
+    return best
 
 
 def _nearest(series, end, target_days, tol):
@@ -310,8 +331,8 @@ def earnings_from_facts(facts):
         return series[anchor][0] if anchor in series else None
 
     revenue, net_income, op_income = val(rev), val(ni), val(op)
-    # The prior-year quarter is always the comparative in the same 10-Q (~364 days back);
-    # prior-quarter exists only for Q2/Q3 filings since Q4 lives in the 10-K, not a 10-Q.
+    # Prior-year quarter is ~364 days back and prior quarter ~91; both exist for every
+    # quarter (including a derived Q4) as long as the earlier filings are in the facts feed.
     prev_rev = _nearest(rev, anchor, 364, 20)
     rev_yoy = _pct_change(revenue, prev_rev)
     rev_qoq = _pct_change(revenue, _nearest(rev, anchor, 91, 20))
@@ -339,13 +360,17 @@ def earnings_from_facts(facts):
     return {"status": "success" if live else "no_data", "signal": signal, "period_end": anchor,
             "revenue": revenue, "net_income": net_income, "operating_income": op_income,
             "revenue_yoy": rev_yoy, "revenue_qoq": rev_qoq, "net_income_yoy": ni_yoy,
-            "operating_margin": margin, "margin_change_pp": margin_chg, "detail": detail}
+            "operating_margin": margin, "margin_change_pp": margin_chg,
+            "derived_q4": any(series[anchor][2] for series in (rev, ni, op) if anchor in series),
+            "detail": detail}
 
 
 def analyze_quarterly_earnings(ticker: str, use_cache: bool = True) -> dict:
-    """Latest 10-Q performance from SEC XBRL company facts: revenue growth (YoY/QoQ),
+    """Latest quarter's performance from SEC XBRL company facts: revenue growth (YoY/QoQ),
     net income shift and operating-margin trend, folded into a bounded `signal` in [-1, 1].
-    Fails soft (Meridian rule): always returns a dict with `status` and `signal`, never raises."""
+    The quarter is the newest 10-Q quarter, or the fiscal Q4 derived from the 10-K once that
+    is filed (`derived_q4`). Fails soft (Meridian rule): always returns a dict with
+    `status` and `signal`, never raises."""
     try:
         ticker = ticker.upper()
         if use_cache:
