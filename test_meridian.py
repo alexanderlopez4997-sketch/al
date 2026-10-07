@@ -1137,6 +1137,110 @@ check("DoD dod_signal_for_ticker None for no match / no market cap",
       dod_scraper.dod_signal_for_ticker(_dod_awards, "ZZZZ", 1e9) is None
       and dod_scraper.dod_signal_for_ticker(_dod_awards, "LMT", None) is None)
 
+# ---- name/award extraction from a realistic multi-award daily release (SYNTHETIC fixture
+# written to the documented DoD format: one paragraph per award, grouped by service)
+_day_html = """
+<article>
+  <h2>Contracts for Oct. 6, 2026</h2>
+  <time datetime="2026-10-06T21:00:00Z"></time>
+  <p>AIR FORCE</p>
+  <p>Lockheed Martin Corp., Fort Worth, Texas, has been awarded a $199,303,678 firm-fixed-price
+  contract for F-35 sustainment. Work will be performed in Fort Worth, Texas. Fiscal 2026 funds
+  in the amount of $50,000,000 are being obligated at time of award. Air Force Life Cycle
+  Management Center, Wright-Patterson Air Force Base, Ohio, is the contracting activity (FA8611-26-C-0001).</p>
+  <p>NAVY</p>
+  <p>Sikorsky Aircraft Corp., a Lockheed Martin Co., Stratford, Connecticut, is awarded a $1.2 billion
+  modification (P00012) to a previously awarded contract (N00019-20-C-0001) for CH-53K helicopters,
+  bringing the total cumulative face value of the contract to $9,500,000,000.</p>
+  <p>Huntington Ingalls Inc., Newport News Shipbuilding division, Newport News, Virginia, is awarded a $310,000,000 contract.</p>
+  <p>Booz Allen Hamilton Inc., McLean, Virginia (N00178-26-D-0001); Leidos Inc., Reston, Virginia (N00178-26-D-0002);
+  and General Atomics, San Diego, California (N00178-26-D-0003), are awarded a $300,000,000 multiple-award contract.</p>
+  <p>ARMY</p>
+  <p>Raytheon Co., Tucson, Arizona; and Northrop Grumman Systems Corp., Huntsville, Alabama, are each awarded
+  a $90,000,000 contract for missile components.</p>
+  <p>Sturm, Ruger &amp; Co. Inc., Newport, New Hampshire, was awarded a $12,000,000 contract for rifles.</p>
+  <p>Bell Boeing Joint Project Office, Amarillo, Texas, was awarded a $40,000,000 modification for V-22 support.</p>
+  <p>Tiny Widgets LLC, Dayton, Ohio, is awarded a $500,000 contract.</p>
+  <p>*Small business set-aside.</p>
+</article>
+"""
+_day = dod_scraper.dod_daily_awards(html=_day_html)
+_by = lambda n: [a for a in _day if n.lower() in a["contractor"].lower()]
+check("day release: one award per awardee paragraph, not one per article", len(_day) >= 9)
+_lm = _by("Lockheed Martin Corp")[0]
+check("day release: value is the headline amount, not the funds-obligated one",
+      _lm["value_usd"] == 199_303_678 and _lm["ticker"] == "LMT" and _lm["date"] == "2026-10-06")
+_sk = _by("Sikorsky")[0]
+check("day release: billion parsed, first amount wins over cumulative total",
+      _sk["value_usd"] == 1.2e9 and _sk["ticker"] == "LMT")
+check("day release: subsidiary-division name maps to parent (HII)", _by("Huntington Ingalls")[0]["ticker"] == "HII")
+_multi = [a for a in _day if a["description"].startswith("Booz Allen")]
+check("day release: multi-award paragraph yields one entry per awardee", len(_multi) == 3)
+check("day release: shared ceiling is split evenly across awardees (not counted 3x)",
+      all(abs(a["value_usd"] - 100e6) < 1 and a["value_total_usd"] == 300e6 and a["n_awardees"] == 3 for a in _multi))
+check("day release: multi-award tickers/None resolved per awardee",
+      {a["contractor"].split()[0]: a["ticker"] for a in _multi} == {"Booz": "BAH", "Leidos": "LDOS", "General": None})
+_each = [a for a in _day if a["description"].startswith("Raytheon")]
+check("day release: 'each awarded' gives every awardee the full value",
+      len(_each) == 2 and all(a["value_usd"] == 90e6 for a in _each)
+      and {a["ticker"] for a in _each} == {"RTX", "NOC"})
+check("day release: comma inside a name is kept (Sturm, Ruger)", _by("Sturm")[0]["ticker"] == "RGR")
+check("day release: JV maps to no ticker", _by("Bell Boeing")[0]["ticker"] is None)
+check("day release: headings, footnotes and sub-$1M awards are dropped",
+      not _by("Tiny Widgets") and all(a["contractor"] not in ("ARMY", "NAVY", "AIR FORCE") for a in _day))
+
+# multiple same-day awards to one ticker are summed, not averaged / last-wins
+_lmt_all = [a for a in _day if a["ticker"] == "LMT"]
+_sum = dod_scraper.dod_signal_for_ticker(_day, "LMT", 100e9)
+check("DoD per-ticker signal sums that ticker's awards",
+      _sum is not None and "awards totaling" in _sum["detail"]
+      and abs(_sum["signal"] - sum(a["value_usd"] for a in _lmt_all) / 100e9) < 1e-9)
+check("DoD bulk score sums too (not last-wins)",
+      abs(dod_scraper.dod_bulk_score(_day, lambda t: {"market_cap": 100e9})["LMT"]["signal"] - _sum["signal"]) < 1e-9)
+
+# value extraction: first amount in reading order
+check("value: first $ amount in text order, not first unit seen",
+      dod_scraper._extract_award_value("a $5,000,000 award; total $2.5 billion") == 5_000_000)
+check("value: million / thousand / plain / none",
+      dod_scraper._extract_award_value("$125.5 million") == 125.5e6
+      and dod_scraper._extract_award_value("$750 thousand") == 750e3
+      and dod_scraper._extract_award_value("no money here") is None)
+# contractor extraction on odd shapes
+for _txt, _want in [
+    ("Boeing, Seattle, Washington awarded $125.5 million contract", "Boeing"),
+    ("The Boeing Co., St. Louis, Missouri, is awarded a $9,000,000 contract", "The Boeing Co."),
+    ("Raytheon Technologies Corp., Pratt & Whitney Military Engines, East Hartford, Connecticut, was awarded a $9M", "Raytheon Technologies Corp."),
+    ("contractor: Acme Defense Corp", "Acme Defense"),                    # legacy fallback
+    ("", None),
+]:
+    check(f"extract_contractor({_txt[:40]!r}) -> {_want!r}", dod_scraper._extract_contractor(_txt) == _want)
+check("award sentence with the awardee AFTER the verb is not mis-parsed as 'The contract'",
+      dod_scraper._parse_award_paragraph("The contract was awarded to Acme Corp., Dayton, Ohio, for $5,000,000.") is None
+      and dod_scraper._extract_contractor("The contract was awarded to Acme Corp., Dayton, Ohio, for $5,000,000.") == "Acme")
+check("date from title handles 'Sept.' and plain months",
+      dod_scraper._date_from_title("Contracts for Sept. 30, 2026") == "2026-09-30"
+      and dod_scraper._date_from_title("Contracts for Oct. 6, 2026") == "2026-10-06"
+      and dod_scraper._date_from_title("nothing") is None)
+
+# markup without <article>: loose <p> fallback; headline-only listing: follow article link
+_loose = """<html><body><p>Contracts for Oct. 6, 2026</p>
+<p>Lockheed Martin Corp., Fort Worth, Texas, is awarded a $80,000,000 contract. Completed by Oct. 5, 2031.</p></body></html>"""
+_la = dod_scraper.dod_daily_awards(html=_loose)
+check("loose-<p> fallback extracts the award and dates it from the page header, not the award text",
+      len(_la) == 1 and _la[0]["ticker"] == "LMT" and _la[0]["date"] == "2026-10-06")
+_listing = '<article><h2>Contracts for Oct. 6, 2026</h2><p>Click for details.</p></article><a href="/News/Contracts/Contract/Article/1234567/">x</a>'
+with unittest.mock.patch.object(dod_scraper, "_fetch_dod_html", lambda timeout=15, url=None: _listing), \
+     unittest.mock.patch.object(dod_scraper, "_fetch_url", lambda u, timeout=15: _loose if "/Article/1234567" in u else None):
+    _fa = dod_scraper.dod_daily_awards()
+check("headline-only listing: follows the newest article link and parses it", len(_fa) == 1 and _fa[0]["ticker"] == "LMT")
+_tried = []
+def _fake_fetch(u, timeout=15):
+    _tried.append(u); return "<article><h2>t</h2><p>x</p></article>" if "defense.gov" in u else None
+with unittest.mock.patch.object(dod_scraper, "_fetch_url", _fake_fetch):
+    _h = dod_scraper._fetch_dod_html()
+check("fetch tries war.gov first, falls back to the old defense.gov URL",
+      _tried[0].startswith("https://www.war.gov/") and "defense.gov" in _tried[-1] and _h is not None)
+
 # ---- ticker mapping: token-based matching (no raw-substring false positives)
 _m = dod_scraper._contractor_to_ticker
 for _name, _want in [

@@ -42,7 +42,13 @@ import numpy as np
 
 logger = logging.getLogger("dod_scraper")
 
-DOD_CONTRACTS_URL = "https://www.defense.gov/News/Releases/?Category=Contracts"
+# The department was renamed (Department of War); the daily "Contracts for <date>" page
+# now lives at war.gov/News/Contracts. The old defense.gov listing is kept as a fallback.
+DOD_CONTRACTS_URLS = [
+    "https://www.war.gov/News/Contracts/",
+    "https://www.defense.gov/News/Releases/?Category=Contracts",
+]
+DOD_CONTRACTS_URL = DOD_CONTRACTS_URLS[0]      # back-compat alias
 DOD_UA = {"User-Agent": "Meridian Research meridian-app contact@example.com"}
 
 # Contractor name -> ticker. Keys are matched on normalised word tokens (see
@@ -252,25 +258,49 @@ def unmapped_contractors(awards, min_value=50e6):
 
 
 class DODReleaseParser(HTMLParser):
-    """Parse DoD contract release HTML, extracting award details."""
+    """Parse DoD contract release HTML, extracting award details.
+
+    Paragraphs inside an <article> are kept separate (one per line, line-wraps inside a
+    paragraph collapsed to spaces) — a day's
+    release is dozens of one-paragraph awards, and gluing them together made the
+    extractor see a single blob. Every <p> on the page is also collected in
+    `loose_paragraphs`, as a fallback for markup that doesn't use <article>."""
 
     def __init__(self):
         super().__init__()
         self.in_article = False
         self.in_title = False
         self.in_body = False
+        self.in_p = False
         self.current_title = ""
         self.current_body = ""
         self.current_date = ""
+        self.current_p = ""
+        self.body_par = ""
         self.articles = []
+        self.loose_paragraphs = []
+        self.hrefs = []
 
     def handle_starttag(self, tag, attrs):
         if tag == "article":
             self.in_article = True
         elif tag == "h2" and self.in_article:
             self.in_title = True
-        elif tag == "p" and self.in_article:
-            self.in_body = True
+        elif tag == "p":
+            self.in_p = True
+            self.current_p = ""
+            self.body_par = ""
+            if self.in_article:
+                self.in_body = True
+        elif tag == "br":
+            if self.in_body:
+                self._flush_body_par()
+            if self.in_p:
+                self.current_p += " "
+        elif tag == "a":
+            for k, v in attrs:
+                if k == "href" and v:
+                    self.hrefs.append(v)
         # Extract date from time tag
         elif tag == "time" and self.in_article:
             for k, v in attrs:
@@ -292,27 +322,71 @@ class DODReleaseParser(HTMLParser):
         elif tag == "h2":
             self.in_title = False
         elif tag == "p":
+            if self.in_body:
+                self._flush_body_par()
+            par = " ".join(self.current_p.split())
+            if par:
+                self.loose_paragraphs.append(par)
+            self.in_p = False
             self.in_body = False
+
+    def _flush_body_par(self):
+        """End the current paragraph: collapse its source line-wraps to single spaces and
+        add it to the article body on its own line."""
+        par = " ".join(self.body_par.split())
+        if par:
+            self.current_body += par + "\n"
+        self.body_par = ""
 
     def handle_data(self, data):
         if self.in_title:
             self.current_title += data
         elif self.in_body:
-            self.current_body += data
+            self.body_par += data
+        if self.in_p:
+            self.current_p += data
 
 
-def _fetch_dod_html(timeout=15):
-    """Fetch DoD contracts page HTML. Returns HTML text or None on failure."""
+def _fetch_url(url, timeout=15):
+    """GET `url` as text, or None on failure."""
     try:
-        req = urllib.request.Request(DOD_CONTRACTS_URL, headers=DOD_UA)
+        req = urllib.request.Request(url, headers=DOD_UA)
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read().decode('utf-8')
+            return r.read().decode('utf-8', errors='replace')
     except urllib.error.URLError as e:
-        logger.warning(f"Failed to fetch DoD page: {e.reason}")
+        logger.warning(f"Failed to fetch DoD page {url}: {getattr(e, 'reason', e)}")
         return None
     except Exception as e:
-        logger.warning(f"Unexpected error fetching DoD page: {e}")
+        logger.warning(f"Unexpected error fetching DoD page {url}: {e}")
         return None
+
+
+def _fetch_dod_html(timeout=15, url=None):
+    """Fetch the DoD contracts page. Tries `url` (or each of DOD_CONTRACTS_URLS in
+    order) and returns the first page that looks like it has content
+    (contains an <article> or a <p>), else the first non-empty page, else None."""
+    first = None
+    for u in ([url] if url else DOD_CONTRACTS_URLS):
+        html = _fetch_url(u, timeout)
+        if not html:
+            continue
+        if re.search(r"<article|<p[\s>]", html, re.I):
+            return html
+        first = first or html
+    return first
+
+
+# Article pages for a given day. UNVERIFIED against live markup (war.gov was not
+# reachable when this was written) — used only when the listing page itself has no
+# award text, and it fails soft.
+_ARTICLE_HREF_RE = re.compile(r"/News/(?:Contracts/Contract|Releases/Release)/Article/\d+", re.I)
+
+
+def _latest_article_url(hrefs, base="https://www.war.gov"):
+    for h in hrefs:
+        if _ARTICLE_HREF_RE.search(h):
+            return h if h.startswith("http") else base + (h if h.startswith("/") else "/" + h)
+    return None
 
 
 def _is_contract_release(title, body):
@@ -327,52 +401,97 @@ def _is_contract_release(title, body):
     return sum(1 for kw in keywords if kw in text) >= 2
 
 
-def _extract_award_value(text):
-    """Extract USD amount from contract announcement text.
+_VALUE_RE = re.compile(r'\$\s*(\d[\d,]*(?:\.\d+)?)\s*(billion|million|thousand)?', re.I)
+_UNIT = {"billion": 1e9, "million": 1e6, "thousand": 1e3}
 
-    Looks for patterns like:
-      - $123.45 million
-      - $1.2 billion
-      - $12,345,678
-    Returns amount in USD (float) or None."""
-    # Try: $X.X million/billion/thousand
-    for pattern in [
-        r'\$\s*([\d,]+\.?\d*)\s*billion',
-        r'\$\s*([\d,]+\.?\d*)\s*million',
-        r'\$\s*([\d,]+\.?\d*)\s*thousand',
-        r'\$\s*([\d,]+(?:,\d{3})*\.?\d*)\b',  # $X,XXX or $X.XX
-    ]:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            amount_str = match.group(1).replace(',', '')
-            try:
-                amount = float(amount_str)
-                # Scale by unit
-                if 'billion' in match.group(0).lower():
-                    amount *= 1e9
-                elif 'million' in match.group(0).lower():
-                    amount *= 1e6
-                elif 'thousand' in match.group(0).lower():
-                    amount *= 1e3
-                return amount
-            except ValueError:
-                continue
+
+def _extract_award_value(text):
+    """First dollar amount in `text`, in USD (float), or None.
+
+    Handles "$1.2 billion", "$125.5 million", "$199,303,678". Takes the first amount in
+    reading order (a paragraph's headline value comes before any cumulative total or
+    obligated-funds figure) — not the first unit that happens to appear anywhere."""
+    for m in _VALUE_RE.finditer(text or ""):
+        try:
+            amount = float(m.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        return amount * _UNIT.get((m.group(2) or "").lower(), 1.0)
     return None
 
 
-def _extract_contractor(text):
-    """Extract primary contractor name from announcement.
+# "<awardees> is/was/are/has been/have been (each) awarded|selected ..." — the verb phrase
+# that separates the awardee list from the rest of an award paragraph. A bare
+# "awarded" is allowed ("Boeing, Seattle, Washington awarded $125M ...").
+_AWARD_VERB_RE = re.compile(
+    r"(?:\b(?:is|was|are|were|has|have)\b(?:\s+(?:been|being|each))*\s+)?\b(?:awarded|selected)\b",
+    re.I)
+_SUFFIX_TOKENS = frozenset({"inc", "incorporated", "corp", "corporation", "co", "company",
+                            "llc", "lp", "llp", "ltd", "limited", "plc"})
+_AWARDEE_SPLIT_RE = re.compile(r";\s*(?:and\s+)?|,\s+and\s+(?=[A-Z0-9])")
 
-    Looks for patterns like:
-      - "Contractor: Lockheed Martin..."
-      - "awarded to Lockheed Martin..."
-      - "...Lockheed Martin Corporation..."
-    Returns contractor name or None."""
-    # First-line heuristic: major contractors usually in headline or first sentence
+
+def _has_legal_suffix(seg):
+    toks = re.sub(r"[^a-z0-9 ]+", " ", seg.lower()).split()
+    return bool(toks) and toks[-1] in _SUFFIX_TOKENS
+
+
+def _awardee_name(chunk):
+    """'Lockheed Martin Corp., Fort Worth, Texas (FA8611-26-C-0001)' -> 'Lockheed Martin Corp.'
+
+    The name is the text before the first comma, except when a name itself contains
+    one: "Sturm, Ruger & Co. Inc., Newport, New Hampshire" (first segment has no legal
+    suffix, the second does -> join them)."""
+    chunk = re.sub(r"\([^)]*\)", " ", chunk)                 # contract numbers
+    chunk = re.sub(r"^\s*[*\s]*(?:and\s+)?", "", chunk, flags=re.I)
+    segs = [x.strip() for x in chunk.split(",") if x.strip()]
+    if not segs:
+        return None
+    name = segs[0]
+    if len(segs) >= 2 and not _has_legal_suffix(segs[0]) and _has_legal_suffix(segs[1]) \
+            and len(segs[0].split()) == 1:
+        name = f"{segs[0]}, {segs[1]}"
+    name = " ".join(name.split())
+    if not name or not name[0].isalnum() or len(name) > 120 or len(name) < 2:
+        return None
+    return name
+
+
+def _parse_award_paragraph(par):
+    """One award paragraph -> {awardees:[names], each:bool, value:float, text:str} or None.
+
+    Works on the DoD release shape, where each award is one paragraph:
+      "<Name>, <City>, <State>, is awarded a $<amount> ... contract ..."
+      "<A>, <City>, <State>; and <B>, <City>, <State>, are each awarded ..."   (multi-award)
+    Returns None for anything that isn't an award sentence (section headings such as
+    "ARMY", footnotes, boilerplate) or that has no dollar amount after the verb."""
+    par = " ".join(par.split())
+    m = _AWARD_VERB_RE.search(par)
+    if not m:
+        return None
+    if re.match(r"\s+to\b", par[m.end():], re.I):
+        return None   # "... was awarded to <NAME>": awardee follows the verb; legacy path handles it
+    lead = par[:m.start()].strip(" ,;")
+    if not (3 <= len(lead) <= 600) or not lead.lstrip("* ")[:1].isalnum():
+        return None
+    value = _extract_award_value(par[m.end():])
+    if not value:
+        return None
+    names = []
+    for chunk in _AWARDEE_SPLIT_RE.split(lead):
+        n = _awardee_name(chunk)
+        if n and n.lower() not in {x.lower() for x in names}:
+            names.append(n)
+    if not names:
+        return None
+    return {"awardees": names, "each": "each" in m.group(0).lower(), "value": value, "text": par}
+
+
+def _extract_contractor_legacy(text):
+    """Old heuristics, kept as a fallback for text that isn't in the DoD award-sentence
+    shape: "contractor: NAME", "awarded to NAME", or a "<Words> Corp/Inc/..." phrase."""
     lines = text.split('\n')
     full_text = ' '.join(lines[:3])  # first ~3 lines
-
-    # Try: "contractor: NAME" or "awarded to NAME" or named entity in first sentence
     for pattern in [
         r'(?:contractor|prime|awardee):\s*([^,;.\n]+)',
         r'awarded to\s+([^,;.\n]+)',
@@ -381,13 +500,113 @@ def _extract_contractor(text):
         match = re.search(pattern, full_text, re.IGNORECASE)
         if match:
             name = match.group(1).strip()
-            # Clean up common suffixes
             for suffix in [" corporation", " corp", " inc", " company", " ltd", " technologies"]:
                 if name.lower().endswith(suffix):
                     name = name[:-len(suffix)].strip()
             if name and len(name) > 2:  # ignore tiny matches
                 return name
     return None
+
+
+def _extract_contractor(text):
+    """Primary contractor name from announcement text, or None.
+
+    First choice: the awardee list of the first award sentence ("<Name>, <City>,
+    <State>, is awarded ..."), which handles divisions, subsidiaries, and joint awards.
+    Fallback: the legacy keyword/suffix heuristics."""
+    for par in re.split(r"\n+", text or ""):
+        parsed = _parse_award_paragraph(par)
+        if parsed:
+            return parsed["awardees"][0]
+    return _extract_contractor_legacy(text or "")
+
+
+_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def _date_from_title(title):
+    """'Contracts for Oct. 6, 2026' / 'Contracts for Sept. 30, 2026' -> '2026-10-06', else None."""
+    m = re.search(r"([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})", title or "")
+    if not m or m.group(1)[:3].lower() not in _MONTHS:
+        return None
+    try:
+        return datetime(int(m.group(3)), _MONTHS[m.group(1)[:3].lower()], int(m.group(2))).date().isoformat()
+    except ValueError:
+        return None
+
+
+def _awards_from_text_blocks(blocks, title, date):
+    """Per-paragraph awards from a list of text blocks (each may hold several
+    newline-separated paragraphs). One entry per awardee; a multi-award paragraph
+    splits its value evenly across awardees unless it says "each awarded"."""
+    out = []
+    for block in blocks:
+        for par in re.split(r"\n+", block):
+            parsed = _parse_award_paragraph(par)
+            if not parsed:
+                continue
+            names, total = parsed["awardees"], parsed["value"]
+            per = total if (parsed["each"] or len(names) == 1) else total / len(names)
+            if per < 1e6:  # ignore sub-$1M (noise)
+                continue
+            for name in names:
+                out.append({
+                    "title": title,
+                    "contractor": name,
+                    "ticker": _contractor_to_ticker(name),
+                    "value_usd": per,
+                    "value_total_usd": total,
+                    "n_awardees": len(names),
+                    "date": date,
+                    "description": parsed["text"][:500],
+                })
+    return out
+
+
+def _parse_awards_html(html):
+    """HTML -> list of award dicts (see dod_daily_awards). Per-paragraph extraction
+    from <article> bodies first, then from any <p> on the page, then the legacy
+    one-award-per-article path for articles that aren't in the award-sentence shape."""
+    parser = DODReleaseParser()
+    try:
+        parser.feed(html)
+    except Exception as e:
+        logger.warning(f"HTML parsing error: {e}")
+        return []
+
+    awards = []
+    for article in parser.articles:
+        date = (article["date"][:10] if article["date"] else None) \
+            or _date_from_title(article["title"]) or datetime.now(timezone.utc).date().isoformat()
+        found = _awards_from_text_blocks([article["body"]], article["title"], date)
+        if found:
+            awards.extend(found)
+            continue
+        # Legacy path: one award per article (headline + free text, no award sentence)
+        if not _is_contract_release(article["title"], article["body"]):
+            continue
+        value = _extract_award_value(article["body"])
+        if not value or value < 1e6:  # ignore sub-$1M (noise)
+            continue
+        contractor = _extract_contractor(article["body"])
+        ticker = _contractor_to_ticker(contractor) if contractor else None
+        awards.append({
+            "title": article["title"],
+            "contractor": contractor or "Unknown",
+            "ticker": ticker,
+            "value_usd": value,
+            "date": date,
+            "description": article["body"][:500],  # first 500 chars
+        })
+
+    if not awards and parser.loose_paragraphs:
+        # A short paragraph that is just a date line ("Contracts for Oct. 6, 2026") dates the
+        # page; a long award paragraph's own dates ("completed by Oct. 2031") must not.
+        head = next((h for h in parser.loose_paragraphs if len(h) < 60 and _date_from_title(h)), "")
+        date = _date_from_title(head) or datetime.now(timezone.utc).date().isoformat()
+        awards = _awards_from_text_blocks(parser.loose_paragraphs, "Contracts", date)
+    return awards
 
 
 def dod_daily_awards(html=None, url=None, timeout=15):
@@ -408,40 +627,26 @@ def dod_daily_awards(html=None, url=None, timeout=15):
         "description": str,     # full announcement text
       }
     """
-    if html is None:
-        html = _fetch_dod_html(timeout)
+    fetched = html is None
+    if fetched:
+        html = _fetch_dod_html(timeout, url=url)
 
     if not html:
         logger.warning("No HTML to parse; returning empty list")
         return []
 
-    parser = DODReleaseParser()
-    try:
-        parser.feed(html)
-    except Exception as e:
-        logger.warning(f"HTML parsing error: {e}")
-        return []
-
-    awards = []
-    for article in parser.articles:
-        if not _is_contract_release(article["title"], article["body"]):
-            continue
-
-        value = _extract_award_value(article["body"])
-        if not value or value < 1e6:  # ignore sub-$1M (noise)
-            continue
-
-        contractor = _extract_contractor(article["body"])
-        ticker = _contractor_to_ticker(contractor) if contractor else None
-
-        awards.append({
-            "title": article["title"],
-            "contractor": contractor or "Unknown",
-            "ticker": ticker,
-            "value_usd": value,
-            "date": article["date"][:10],  # ISO date only
-            "description": article["body"][:500],  # first 500 chars
-        })
+    awards = _parse_awards_html(html)
+    if not awards and fetched:
+        # The listing page may only carry headlines; follow the newest day's article page.
+        parser = DODReleaseParser()
+        try:
+            parser.feed(html)
+        except Exception:
+            parser = None
+        art = _latest_article_url(parser.hrefs) if parser else None
+        if art:
+            page = _fetch_url(art, timeout)
+            awards = _parse_awards_html(page) if page else []
 
     for name, total in unmapped_contractors(awards, min_value=100e6):
         logger.info("unmapped DoD contractor %r ($%.0fM) — add to CONTRACTOR_TICKER_MAP "
@@ -489,8 +694,26 @@ def dod_award_signal(award, ticker=None, market_cap=None, ttm_revenue=None):
     }
 
 
+def _combined_award(awards, ticker):
+    """All of `ticker`'s awards collapsed into one pseudo-award whose value is their
+    sum — same-day awards stack, so $100M + $60M is a $160M catalyst, not two $100M-ish
+    ones averaged. None if the ticker has no positive-value award."""
+    mine = [a for a in awards if a.get("ticker") == ticker and (a.get("value_usd") or 0) > 0]
+    if not mine:
+        return None
+    return {"ticker": ticker, "contractor": mine[0].get("contractor"), "date": mine[0].get("date"),
+            "value_usd": sum(a["value_usd"] for a in mine), "n": len(mine)}
+
+
+def _combined_signal(combo, **fundamentals):
+    sig = dod_award_signal(combo, ticker=combo["ticker"], **fundamentals)
+    if sig and combo["n"] > 1:
+        sig["detail"] = f"{combo['n']} DoD awards totaling ${combo['value_usd']/1e6:.0f}M"
+    return sig
+
+
 def dod_bulk_score(awards, fundamentals_fn=None):
-    """Score all DoD awards from today, grouped by ticker.
+    """Score all DoD awards from today, grouped by ticker (a ticker's awards are summed).
 
     Args:
       awards: list from dod_daily_awards()
@@ -500,11 +723,7 @@ def dod_bulk_score(awards, fundamentals_fn=None):
       {ticker: {signal, confidence, detail}}
     """
     by_ticker = {}
-    for award in awards:
-        if not award.get("ticker"):
-            continue
-
-        tk = award["ticker"]
+    for tk in sorted({a["ticker"] for a in awards if a.get("ticker")}):
         mcap = ttm_rev = None
         if fundamentals_fn:
             try:
@@ -514,8 +733,8 @@ def dod_bulk_score(awards, fundamentals_fn=None):
                     ttm_rev = fund.get("ttm_revenue")
             except Exception:
                 pass
-
-        sig = dod_award_signal(award, ticker=tk, market_cap=mcap, ttm_revenue=ttm_rev)
+        combo = _combined_award(awards, tk)
+        sig = _combined_signal(combo, market_cap=mcap, ttm_revenue=ttm_rev) if combo else None
         if sig:
             by_ticker[tk] = sig
 
@@ -549,18 +768,12 @@ def annotate_awards(awards, market_cap_fn):
 
 def dod_signal_for_ticker(awards, ticker, market_cap):
     """Collapse today's awards for one ticker into a single {signal, confidence,
-    detail} (mean when there are several), or None if nothing scoreable."""
+    detail} (award values summed, then scored against market cap), or None if
+    nothing scoreable."""
     if not market_cap or market_cap <= 0:
         return None
-    sigs = [s for s in (dod_award_signal(a, ticker=ticker, market_cap=market_cap)
-                        for a in awards if a.get("ticker") == ticker) if s]
-    if not sigs:
-        return None
-    if len(sigs) == 1:
-        return sigs[0]
-    return {"signal": sum(s["signal"] for s in sigs) / len(sigs),
-            "confidence": sum(s["confidence"] for s in sigs) / len(sigs),
-            "detail": f"{len(sigs)} DoD awards"}
+    combo = _combined_award(awards, ticker)
+    return _combined_signal(combo, market_cap=market_cap) if combo else None
 
 
 def schedule_dod_scraper(hour=17, minute=0):
