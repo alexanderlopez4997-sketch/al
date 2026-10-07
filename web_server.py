@@ -1350,13 +1350,19 @@ async function screenCategory(cat){$('main').innerHTML='<div class="loader">Scre
   const f=document.createElement('iframe');f.srcdoc=d.html;$('main').innerHTML='';$('main').appendChild(f);
  }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 async function refresh(){$('wlnote').textContent='updating…';
- try{const [d, cats, news]=await Promise.all([
+ try{const [d, cats, news, gov]=await Promise.all([
   fetch('/api/watchlist?demo='+demo()+'&tickers='+wl()).then(r=>r.json()),
   fetch('/api/categories').then(r=>r.json()),
-  fetch('/api/news?demo='+demo()+'&tickers='+wl()).then(r=>r.json())]);
-  const gov=await fetch('/api/gov_contracts?demo='+demo()+'&tickers='+wl()).then(r=>r.json()).catch(()=>({}));
+  fetch('/api/news?demo='+demo()+'&tickers='+wl()).then(r=>r.json()),
+  fetch('/api/gov_contracts?demo='+demo()+'&tickers='+wl()).then(r=>r.json()).catch(()=>({}))]);
   if(!Array.isArray(d)){$('main').innerHTML='<div class="card" style="color:var(--sell)">Watchlist unavailable: '+((d&&d.error)||'unexpected response')+'</div>';$('wlnote').textContent='';return;}
-  let h='<div style="padding:0"><h2 style="color:var(--gold);margin:0 0 12px;font-size:16px">YOUR WATCHLIST</h2>';
+  let h='<div style="padding:0">';
+  h+='<div class="ahsplit" style="margin-bottom:20px"><section><h2>RECENT NEWS & SENTIMENT</h2>';
+  h+=news.html?news.html:'<div class="muted">No news data available.</div>';
+  h+='</section><section><h2>GOVERNMENT CONTRACTS</h2>';
+  h+=gov.html?gov.html:'<div class="muted">'+(gov.error||'Government contracts unavailable.')+'</div>';
+  h+='</section></div>';
+  h+='<h2 style="color:var(--gold);margin:0 0 12px;font-size:16px">YOUR WATCHLIST</h2>';
   h+='<div class="wgrid">';for(const r of d){const c=r.tone==='good'?'g':r.tone==='bad'?'b':'n';
    const cc=r.chg>=0?'var(--buy)':'var(--sell)';
    h+=`<div class="tile ${c}" onclick="$('tk').value='${r.ticker}';view('analyze');go()">
@@ -1365,11 +1371,6 @@ async function refresh(){$('wlnote').textContent='updating…';
      <div class="p">${r.last} <span style="color:${cc}">${r.chg>=0?'+':''}${r.chg}%</span></div>
      <div class="v" style="color:${r.tone==='good'?'var(--buy)':r.tone==='bad'?'var(--sell)':'var(--amber)'}">${r.verdict}</div></div>`;}
   h+='</div>';
-  h+='<div class="ahsplit" style="margin-top:20px"><section><h2>RECENT NEWS & SENTIMENT</h2>';
-  h+=news.html?news.html:'<div class="muted">No news data available.</div>';
-  h+='</section><section><h2>GOVERNMENT CONTRACTS</h2>';
-  h+=gov.html?gov.html:'<div class="muted">'+(gov.error||'Government contracts unavailable.')+'</div>';
-  h+='</section></div>';
   h+='<h2 style="color:var(--gold);margin:20px 0 12px;font-size:16px">DISCOVER BY STRATEGY</h2>';
   h+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
   for(const[k,v]of Object.entries(cats)){
@@ -1412,10 +1413,10 @@ async function afterhours_(){$('main').innerHTML='<div class="loader">Loading af
  const get=async u=>{try{const d=await(await fetch(u+q)).json();
   return d.error?'<div class="card" style="color:var(--sell)">'+d.error+'</div>':d.html;
  }catch(e){return '<div class="card" style="color:var(--sell)">'+e+'</div>';}};
- const [ah,dod]=await Promise.all([get('/api/afterhours'),get('/api/dod_awards')]);
+ const [ah,gov,dod]=await Promise.all([get('/api/afterhours'),get('/api/gov_contracts'),get('/api/dod_awards')]);
  if(V!=='ah')return;
  $('main').innerHTML='<div class="ahsplit"><section><h2>SEC EDGAR NEWS</h2>'+ah+'</section>'
-  +'<section><h2>DOD CONTRACT AWARDS</h2>'+dod+'</section></div>';}
+  +'<section><h2>GOVERNMENT CONTRACTS</h2>'+gov+'<h2 style="margin-top:20px">DOD CONTRACT AWARDS</h2>'+dod+'</section></div>';}
 function newsFilter(cat,btn){
  document.querySelectorAll('.newsbar .filt').forEach(b=>b.classList.toggle('active',b===btn));
  document.querySelectorAll('.newstable tbody tr').forEach(tr=>{
