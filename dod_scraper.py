@@ -411,6 +411,13 @@ _UNIT = {"billion": 1e9, "million": 1e6, "thousand": 1e3}
 # outweigh a $200M definite contract. A judgment call, not backtested — tune freely.
 CEILING_WEIGHT = 0.10
 
+# Counted award value as a fraction of the contractor's market cap that earns a FULL +1.0
+# signal; smaller awards scale linearly below it. 0.1% of market cap = full signal (so a
+# $65M award to a $65B company, or $1B to a $1T one, maxes out). Set to 1.0 to get the old
+# behavior: signal = the raw award/market-cap ratio, the same convention as
+# contracts.contract_signal() (the Quiver gov-contracts signal).
+DOD_FULL_SIGNAL_RATIO = 0.001
+
 
 def _first_amount(text):
     """(usd, start, end) of the first dollar amount in `text`, or None."""
@@ -708,6 +715,7 @@ def _awards_from_text_blocks(blocks, title, date):
                     "value_kind": kind,
                     "obligated_usd": obl,
                     "effective_value_usd": effective,  # what a signal counts
+                    "vehicle_weight": fin["vehicle_weight"],  # confidence multiplier (IDIQ 0.25, mod 0.80)
                     "n_awardees": len(names),
                     "date": date,
                     "description": parsed["text"][:500],
@@ -828,15 +836,14 @@ def dod_award_signal(award, ticker=None, market_cap=None, ttm_revenue=None):
     if fundamentals is None or fundamentals <= 0:
         return None
 
-    ratio = counted / fundamentals
-    ratio = float(np.clip(ratio, -1, 1))
+    # Signal: counted value vs. market cap, saturating at DOD_FULL_SIGNAL_RATIO.
+    signal = float(np.clip(counted / fundamentals / DOD_FULL_SIGNAL_RATIO, -1, 1))
 
-    if abs(ratio) < 0.001:  # sub-0.1% is noise
-        return None
-
-    # Confidence: counted value + freshness (DoD awards are TODAY, so max decay)
-    val_conf = min(1.0, counted / 1e8)  # $100M = full confidence
-    recency = 1.0  # Today's award = max recency (no decay yet)
+    # Confidence: counted value ($100M = full) x contract-vehicle weight (IDIQ 0.25,
+    # modification 0.80, else 1.0) x freshness (DoD awards are TODAY, so no decay yet).
+    val_conf = min(1.0, counted / 1e8)
+    recency = 1.0
+    confidence = val_conf * float(award.get("vehicle_weight", 1.0)) * recency
 
     face = award.get("value_usd", counted)
     if award.get("value_kind") == "ceiling":
@@ -847,7 +854,27 @@ def dod_award_signal(award, ticker=None, market_cap=None, ttm_revenue=None):
     else:
         detail = (f"${counted/1e6:.0f}M DoD award to {award.get('contractor', '?')} "
                   f"· {award.get('date', '?')}")
-    return {"signal": ratio, "confidence": val_conf * recency, "detail": detail}
+    return {"signal": signal, "confidence": float(confidence), "detail": detail}
+
+
+def enhanced_dod_award_signal(award_record, market_cap):
+    """(signal, confidence) for one award, using its realized economic value rather than
+    the raw ceiling. (0.0, 0.0) when there is no market cap or nothing counts.
+
+    Awards from dod_daily_awards() already carry their parsed breakdown, which is used as
+    is — re-parsing `description` would lose the obligated-funds clause (it is cut to 500
+    characters) and the joint-awardee split. A bare record with only a description and
+    headline value is parsed here instead. dod_award_signal() is the same scoring with a
+    {signal, confidence, detail} result (what alt_data_tilt consumes)."""
+    if not market_cap or market_cap <= 0:
+        return 0.0, 0.0
+    rec = dict(award_record or {})
+    if rec.get("effective_value_usd") is None:
+        fin = parse_contract_financial_obligations(rec.get("description", ""), rec.get("value_usd", 0.0))
+        rec.update(effective_value_usd=fin["realized_economic_value"], vehicle_weight=fin["vehicle_weight"],
+                   value_kind=fin["kind"], obligated_usd=fin["obligated_value"])
+    sig = dod_award_signal(rec, market_cap=market_cap)
+    return (sig["signal"], sig["confidence"]) if sig else (0.0, 0.0)
 
 
 def _combined_award(awards, ticker):
@@ -857,9 +884,12 @@ def _combined_award(awards, ticker):
     mine = [a for a in awards if a.get("ticker") == ticker and award_counted_usd(a) > 0]
     if not mine:
         return None
+    counted = sum(award_counted_usd(a) for a in mine)
     return {"ticker": ticker, "contractor": mine[0].get("contractor"), "date": mine[0].get("date"),
-            "value_usd": sum(award_counted_usd(a) for a in mine),
-            "face_usd": sum(a.get("value_usd", 0) for a in mine), "n": len(mine)}
+            "value_usd": counted,
+            "face_usd": sum(a.get("value_usd", 0) for a in mine), "n": len(mine),
+            # a ticker's confidence weight follows where its counted dollars came from
+            "vehicle_weight": sum(award_counted_usd(a) * a.get("vehicle_weight", 1.0) for a in mine) / counted}
 
 
 def _combined_signal(combo, **fundamentals):
