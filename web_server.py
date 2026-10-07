@@ -230,6 +230,9 @@ def _full_analyze(sym, demo, optimize=False):
         sen = _try(lambda: se.news_sentiment(sym, fkey, avk))
         res["filings"] = _try(lambda: edgar.recent_filings(sym, days=3), [])
         res["insider_form4"] = _try(lambda: edgar.form4_insider_bias(sym))
+        # Display-only badge from the same Form 4 fetch (no second SEC call). Live
+        # branch only: never reached in demo/backtest, and not fed into the score.
+        res["insider_cluster"] = _try(lambda: edgar.insider_cluster_for_ticker(sym, bias=res["insider_form4"]))
         res["research"] = _try(lambda: rs.fetch_company_research(sym, avk))
         res["primary_filings"] = _try(lambda: edgar.primary_filings(sym), {})
         # Gov contracts: fetch contracts and score with market cap
@@ -277,6 +280,7 @@ def _full_analyze(sym, demo, optimize=False):
             "win_rate": round(res.get("verdict", {}).get("win_rate", 0.5), 3),
             "report": _seg_html(segs),
             "confirmation_html": _confirmation_html(res),
+            "cluster_badge_html": _insider_cluster_html(res.get("insider_cluster")),
             "research_html": _research_html(res.get("research"), res.get("primary_filings") or {}, demo)}
 
 
@@ -300,6 +304,32 @@ def _confirmation_html(res):
     return (f'<div class="card" style="border-left:4px solid {col}">'
             f'<b style="color:{col};font-size:1.1em">{_html.escape(cs["headline"])}</b>'
             f' <span class="muted">· {cs["passed"]}/{cs["checkable"]} signals agree</span>{kills}</div>')
+
+
+CLUSTER_HIGH_CONVICTION = 0.5   # confidence >= 0.5 == $1M+ of role-weighted buying
+
+
+def _insider_cluster_html(cluster):
+    """Badge for a coordinated insider-buying cluster (edgar.detect_insider_clusters).
+    "High-Conviction" tier at confidence >= CLUSTER_HIGH_CONVICTION, plain
+    "Insider Cluster" below it. "" when there's no cluster or the input is
+    malformed -- display-only, so it must never break the analysis."""
+    try:
+        if not cluster or not cluster.get("cluster_detected"):
+            return ""
+        conf = float(cluster.get("confidence") or 0.0)
+        n = int(cluster.get("unique_buyer_count") or 0)
+        usd = float(cluster.get("total_value") or 0.0)
+    except Exception:
+        return ""
+    high = conf >= CLUSTER_HIGH_CONVICTION
+    title = "HIGH-CONVICTION INSIDER CLUSTER" if high else "INSIDER CLUSTER"
+    tip = _html.escape(str(cluster.get("details") or ""), quote=True)
+    return (f'<div class="cluster-badge{" high" if high else ""}" title="{tip}">'
+            f'<span class="cluster-icon">◆</span>'
+            f'<span class="cluster-title">{title}</span>'
+            f'<span class="cluster-meta">{n} insiders · {_fmt_big(usd)} bought (72h) · '
+            f'conviction {conf:.0%}</span></div>')
 
 
 def _ohlc(sym, demo):
@@ -1221,6 +1251,14 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  .px{font-family:ui-monospace,monospace;font-size:18px}.badge{margin-left:auto;padding:6px 16px;border-radius:6px;font-weight:800;letter-spacing:1px}
  .good{background:#0f2f22;color:var(--buy);border:1px solid var(--buy)}.neutral{background:#2f2710;color:var(--amber);border:1px solid var(--amber)}.bad{background:#2f1414;color:var(--sell);border:1px solid var(--sell)}
  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+ .cluster-badge{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-bottom:14px;padding:10px 14px;
+   background:var(--panel);border:1px solid var(--blue);border-left:4px solid var(--blue);border-radius:8px}
+ .cluster-badge.high{background:#2f2710;border-color:var(--gold);border-left-color:var(--gold)}
+ .cluster-icon{color:var(--blue);font-size:14px}.cluster-badge.high .cluster-icon{color:var(--gold)}
+ .cluster-title{font-weight:800;letter-spacing:1px;font-size:12px;color:var(--txt)}
+ .cluster-badge.high .cluster-title{color:var(--gold)}
+ .cluster-meta{margin-left:auto;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--dim)}
+ @media(max-width:600px){.cluster-meta{margin-left:0;flex-basis:100%}}
  #chart{height:300px}
  .report{white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;line-height:1.55}
  .muted{color:var(--dim)}.loader{color:var(--gold)}iframe{width:100%;height:80vh;border:0;border-radius:10px;background:#fff}
@@ -1391,7 +1429,7 @@ async function go(){const t=$('tk').value.trim().toUpperCase()||'NVDA';
    +'<span class="px">'+a.last.toFixed(2)+' <span style="color:'+cc+'">'+(a.chg>=0?'+':'')+a.chg+'%</span></span>'
    +renderVerdict(a)
    +'<span class="badge '+cls+'">'+a.verdict+'</span></div>'
-   +(a.confirmation_html||'')
+   +(a.confirmation_html||'')+(a.cluster_badge_html||'')
    +'<div class="card"><div id="chart"></div></div><div class="card report">'+a.report+'</div>'
    +'<div class="card"><details><summary style="cursor:pointer;color:var(--gold);font-weight:700;letter-spacing:1px;font-size:13px">RESEARCH — company overview · valuation · quality · ownership</summary>'
    +'<div style="margin-top:12px">'+(a.research_html||'')+'</div></details></div>';

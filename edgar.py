@@ -906,3 +906,47 @@ def detect_insider_clusters(form4_records: list, window_hours: int = 72, min_uni
         "confidence": confidence,
         "details": details
     }
+
+
+def form4_records_from_bias(bias) -> list:
+    """Adapt form4_insider_bias()["transactions"] into detect_insider_clusters()
+    records. Rule 10b5-1 trades are dropped: they're pre-scheduled, so they
+    say nothing about fresh conviction (form4_insider_bias discounts them
+    rather than dropping, but a *cluster* gate shouldn't count them at all).
+    Never raises; [] on None / malformed input or unparseable timestamps."""
+    if not isinstance(bias, dict):
+        return []
+    records = []
+    for tx in bias.get("transactions") or []:
+        try:
+            if tx.get("is_10b5_1"):
+                continue
+            when = datetime.fromisoformat(str(tx.get("accepted", "")).replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            records.append({
+                "filing_date": when, "owner_name": tx.get("owner"), "owner_title": tx.get("title"),
+                "transaction_code": tx.get("code"), "shares": tx.get("shares"),
+                "price_per_share": tx.get("price"), "direct_ownership": True,
+            })
+        except Exception:
+            continue
+    return records
+
+
+def insider_cluster_for_ticker(ticker, bias=None, window_hours: int = 72) -> dict:
+    """LIVE-ONLY cluster check for one ticker, for display (e.g. the dashboard
+    badge). Reuses `bias` (a form4_insider_bias() result the caller already has)
+    to avoid a second SEC round-trip; fetches it itself when omitted. Never
+    raises -- any failure returns the same "no cluster" shape
+    detect_insider_clusters() uses for an empty window. Reads only live Form 4
+    data and is not called from any backtest path."""
+    no_cluster = {"cluster_detected": False, "score": 0.0, "confidence": 0.0,
+                  "details": "Insider cluster data unavailable."}
+    try:
+        if bias is None:
+            bias = form4_insider_bias(ticker, lookback_hours=window_hours)
+        return detect_insider_clusters(form4_records_from_bias(bias), window_hours=window_hours)
+    except Exception:
+        logger.warning("insider_cluster_for_ticker(%s) failed", ticker, exc_info=True)
+        return no_cluster
