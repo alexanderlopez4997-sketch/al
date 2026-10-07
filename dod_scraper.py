@@ -333,32 +333,6 @@ def dod_award_signal(award, ticker=None, market_cap=None, ttm_revenue=None):
     }
 
 
-def dod_ticker_signal(awards, ticker, market_cap):
-    """Blend today's DoD awards for one ticker into a single alt-data signal.
-
-    Args:
-      awards: list from dod_daily_awards()
-      ticker: symbol to match against award["ticker"]
-      market_cap: market cap in USD (None/<=0 -> no signal)
-
-    Returns:
-      {signal, confidence, detail} or None if nothing scorable. Multiple awards
-      are averaged.
-    """
-    if not awards or not market_cap or market_cap <= 0:
-        return None
-    signals = [dod_award_signal(a, ticker=ticker, market_cap=market_cap)
-               for a in awards if a.get("ticker") == ticker]
-    signals = [s for s in signals if s is not None]
-    if not signals:
-        return None
-    if len(signals) == 1:
-        return signals[0]
-    return {"signal": sum(s["signal"] for s in signals) / len(signals),
-            "confidence": sum(s["confidence"] for s in signals) / len(signals),
-            "detail": f"{len(signals)} DoD awards"}
-
-
 def dod_bulk_score(awards, fundamentals_fn=None):
     """Score all DoD awards from today, grouped by ticker.
 
@@ -390,6 +364,47 @@ def dod_bulk_score(awards, fundamentals_fn=None):
             by_ticker[tk] = sig
 
     return by_ticker
+
+
+def annotate_awards(awards, market_cap_fn):
+    """Attach `signal`/`confidence` to each award in place, using the
+    contractor's market cap. `market_cap_fn(ticker)` is called once per ticker.
+    Awards with no ticker, no market cap, or a sub-noise ratio keep
+    signal/confidence = None so callers can show "n/a" instead of a fake 0.
+
+    Returns `awards` for chaining."""
+    caps = {}
+    for award in awards:
+        award.setdefault("signal", None)
+        award.setdefault("confidence", None)
+        tk = award.get("ticker")
+        if not tk:
+            continue
+        if tk not in caps:
+            try:
+                caps[tk] = market_cap_fn(tk)
+            except Exception:
+                caps[tk] = None
+        sig = dod_award_signal(award, ticker=tk, market_cap=caps[tk])
+        if sig:
+            award["signal"], award["confidence"] = sig["signal"], sig["confidence"]
+    return awards
+
+
+def dod_signal_for_ticker(awards, ticker, market_cap):
+    """Collapse today's awards for one ticker into a single {signal, confidence,
+    detail} (mean when there are several), or None if nothing scoreable."""
+    if not market_cap or market_cap <= 0:
+        return None
+    sigs = [s for s in (dod_award_signal(a, ticker=ticker, market_cap=market_cap)
+                        for a in awards if a.get("ticker") == ticker) if s]
+    if not sigs:
+        return None
+    if len(sigs) == 1:
+        return sigs[0]
+    return {"signal": sum(s["signal"] for s in sigs) / len(sigs),
+            "confidence": sum(s["confidence"] for s in sigs) / len(sigs),
+            "detail": f"{len(sigs)} DoD awards"}
 
 
 def schedule_dod_scraper(hour=17, minute=0):

@@ -63,6 +63,14 @@ def confirm(res):
         add("Alt-data tilt not negative", _ok(alt["adjustment"] >= 0), f"{alt['adjustment']:+.1f}")
     else:
         add("Alt-data tilt not negative", "na")
+    # 6b · DoD contract award today (defense.gov, scored vs. market cap). Only ever
+    # confirms: an award is a positive catalyst, never a sell signal, so there is no
+    # kill-switch. Awards under ~$10M (confidence < 0.1) are noise -> n/a, not a fail.
+    dod = res.get("dod_awards")
+    if dod and dod.get("confidence", 0) >= 0.1:
+        add("DoD contract award today", _ok(dod["signal"] > 0), dod.get("detail", ""))
+    else:
+        add("DoD contract award today", "na")
     # 7 · whale accumulation (distribution is a kill)
     w = res.get("whale_activity")
     if w:
@@ -126,14 +134,14 @@ def confirm(res):
     passed = sum(1 for _, s, _ in checks if s == "pass")
     checkable = sum(1 for _, s, _ in checks if s != "na")
     if not good:
-        headline = "— not a BUY signal to confirm"
+        headline, level = "— not a BUY signal to confirm", "none"
     elif kills:
-        headline = f"🔴 NOT VERIFIED — {len(kills)} kill-switch(es)"
+        headline, level = f"🔴 NOT VERIFIED — {len(kills)} kill-switch(es)", "kill"
     elif passed >= 5 and checkable and passed / checkable >= 0.7:
-        headline = "✅ VERIFIED — strong confluence"
+        headline, level = "✅ VERIFIED — strong confluence", "verified"
     elif passed >= 3:
-        headline = "🟡 PARTIAL — some confirmation"
+        headline, level = "🟡 PARTIAL — some confirmation", "partial"
     else:
-        headline = "⚪ WEAK — little confirmation"
-    return {"headline": headline, "passed": passed, "checkable": checkable,
+        headline, level = "⚪ WEAK — little confirmation", "weak"
+    return {"headline": headline, "level": level, "passed": passed, "checkable": checkable,
             "checks": checks, "kills": kills}

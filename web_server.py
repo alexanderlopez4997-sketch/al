@@ -50,6 +50,7 @@ import morning as mb
 import trackrecord as tr
 import websocket_client_v2 as wsc
 import aapl_dashboard as ad
+import confirmation as cf
 import contracts
 import dod_scraper
 
@@ -242,27 +243,14 @@ def _full_analyze(sym, demo, optimize=False):
             return contracts.contract_signal(summary, market_cap=mcap)
         gov_contracts = _try(_fetch_contracts)
         # DoD daily awards: fetch and score matching this ticker
-        dod_awards = None
         def _fetch_dod_awards():
             awards = dod_scraper.dod_daily_awards()
-            if not awards:
+            if not any(a.get("ticker") == sym for a in awards):
                 return None
             mcap = contracts.market_cap_from_finnhub(sym, fkey)
-            if not mcap or mcap <= 0:
-                return None
-            ticker_awards = [a for a in awards if a.get("ticker") == sym]
-            if not ticker_awards:
-                return None
-            signals = [dod_scraper.dod_award_signal(a, ticker=sym, market_cap=mcap) for a in ticker_awards]
-            signals = [s for s in signals if s is not None]
-            if not signals:
-                return None
-            if len(signals) == 1:
-                return signals[0]
-            avg_signal = sum(s["signal"] for s in signals) / len(signals)
-            avg_conf = sum(s["confidence"] for s in signals) / len(signals)
-            return {"signal": avg_signal, "confidence": avg_conf, "detail": f"{len(signals)} DoD awards"}
+            return dod_scraper.dod_signal_for_ticker(awards, sym, mcap)
         dod_awards = _try(_fetch_dod_awards)
+        res["dod_awards"] = dod_awards              # read by confirmation.confirm()
         if akey and asec:
             w0, w1 = of.after_hours_window()
             res["orderflow"] = _try(lambda: of.darkpool_blocks(sym, akey, asec, w0, w1, 200000))
@@ -288,7 +276,30 @@ def _full_analyze(sym, demo, optimize=False):
             "information_ratio": round(res.get("verdict", {}).get("information_ratio", 0.0), 3),
             "win_rate": round(res.get("verdict", {}).get("win_rate", 0.5), 3),
             "report": _seg_html(segs),
+            "confirmation_html": _confirmation_html(res),
             "research_html": _research_html(res.get("research"), res.get("primary_filings") or {}, demo)}
+
+
+_CONFIRM_COLOR = {"verified": "#2ECC8F", "partial": "#E0A83B", "weak": "#6B7E92", "kill": "#FF5449"}
+
+
+def _confirmation_html(res):
+    """Green-signal banner for a BUY verdict: headline + signals-agree count +
+    any kill-switches, from confirmation.confirm() (the full per-check list is
+    already in the report text below). "" when it isn't a BUY or confirm()
+    fails — the banner must never break the analysis."""
+    try:
+        cs = cf.confirm(res)
+    except Exception:
+        return ""
+    if cs["level"] == "none":
+        return ""
+    col = _CONFIRM_COLOR.get(cs["level"], "#6B7E92")
+    kills = "".join(f'<div class="sub" style="color:#FF5449">🔴 {_html.escape(lbl)} — {_html.escape(str(det))}</div>'
+                    for lbl, det in cs["kills"])
+    return (f'<div class="card" style="border-left:4px solid {col}">'
+            f'<b style="color:{col};font-size:1.1em">{_html.escape(cs["headline"])}</b>'
+            f' <span class="muted">· {cs["passed"]}/{cs["checkable"]} signals agree</span>{kills}</div>')
 
 
 def _ohlc(sym, demo):
@@ -787,6 +798,8 @@ def _dod_awards_html(demo):
         awards = _try(lambda: dod_scraper.dod_daily_awards(), [])
         if not awards:
             return {"html": '<div class="muted">No DoD contract awards announced today.</div>'}
+        _try(lambda: dod_scraper.annotate_awards(
+            awards, lambda tk: contracts.market_cap_from_finnhub(tk, fkey)))
         for award in awards:
             if award.get("ticker"):
                 sentiment_data = _try(lambda a=award: se.news_sentiment(a["ticker"], fkey, avk, days=1))
@@ -799,7 +812,7 @@ def _dod_awards_html(demo):
     rows = ""
     total_value = 0
     for award in awards:
-        ticker = award.get("ticker", "?")
+        ticker = award.get("ticker") or "?"
         contractor = award.get("contractor", "Unknown")
         value = award.get("value_usd", 0)
         total_value += value
@@ -807,8 +820,10 @@ def _dod_awards_html(demo):
         date_str = award.get("date", "today")
         sentiment = award.get("sentiment", "neutral")
         sentiment_color = "#2ECC8F" if sentiment == "bullish" else "#FF5449" if sentiment == "bearish" else "#E0A83B"
-        signal = award.get("signal", 0)
-        conf = award.get("confidence", 0)
+        signal = award.get("signal")
+        conf = award.get("confidence")
+        score_txt = (f'🎯 signal <span style="color:#B15CDE">{signal:+.2f}</span> · confidence {conf:.0%}'
+                     if signal is not None and conf is not None else "🎯 signal n/a (no ticker/market cap)")
 
         rows += (f'<div class="ohcard" style="border-left:3px solid #B15CDE">'
                 f'<div class="ohh">'
@@ -817,7 +832,7 @@ def _dod_awards_html(demo):
                 f'</div>'
                 f'<div class="sub" style="color:#B8C5D6">{_fmt_usd_k(value)} · {_html.escape(desc)}</div>'
                 f'<div class="stat" style="margin-top:8px;font-size:12px;color:#9B9FAE">'
-                f'📅 {date_str} · 🎯 signal <span style="color:#B15CDE">{signal:+.2f}</span> · confidence {conf:.0%}'
+                f'📅 {date_str} · {score_txt}'
                 f'</div></div>')
 
     summary = f'{len(awards)} award{"s" if len(awards) != 1 else ""} · {_fmt_usd_k(total_value)} total value'
@@ -1304,6 +1319,7 @@ async function go(){const t=$('tk').value.trim().toUpperCase()||'NVDA';
    +'<span class="px">'+a.last.toFixed(2)+' <span style="color:'+cc+'">'+(a.chg>=0?'+':'')+a.chg+'%</span></span>'
    +renderVerdict(a)
    +'<span class="badge '+cls+'">'+a.verdict+'</span></div>'
+   +(a.confirmation_html||'')
    +'<div class="card"><div id="chart"></div></div><div class="card report">'+a.report+'</div>'
    +'<div class="card"><details><summary style="cursor:pointer;color:var(--gold);font-weight:700;letter-spacing:1px;font-size:13px">RESEARCH — company overview · valuation · quality · ownership</summary>'
    +'<div style="margin-top:12px">'+(a.research_html||'')+'</div></details></div>';

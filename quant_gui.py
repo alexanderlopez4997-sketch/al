@@ -1749,26 +1749,20 @@ class App:
                 avk = os.environ.get("ALPHA_VANTAGE_KEY")
                 awards = dod_scraper.dod_daily_awards()
 
-                def enrich(aw):
-                    tk_ = aw.get("ticker")
+                def sentiment(aw):
                     aw["sentiment"] = "neutral"
-                    if not tk_:
+                    if not aw.get("ticker"):
                         return
                     try:
-                        sen = se.news_sentiment(tk_, fkey, avk, days=1)
+                        sen = se.news_sentiment(aw["ticker"], fkey, avk, days=1)
                         sg = (sen or {}).get("signal", 0)
                         aw["sentiment"] = "bullish" if sg > 0.1 else "bearish" if sg < -0.1 else "neutral"
                     except Exception:
                         pass
-                    try:
-                        mcap = contracts.market_cap_from_finnhub(tk_, fkey)
-                        sig = dod_scraper.dod_award_signal(aw, ticker=tk_, market_cap=mcap)
-                        if sig:
-                            aw["signal"], aw["confidence"] = sig["signal"], sig["confidence"]
-                    except Exception:
-                        pass
                 with ThreadPoolExecutor(max_workers=6) as ex:
-                    list(ex.map(enrich, awards))
+                    list(ex.map(sentiment, awards))
+                dod_scraper.annotate_awards(
+                    awards, lambda t: contracts.market_cap_from_finnhub(t, fkey))
             self._post(self._render_dod, awards, demo)
         except Exception as e:
             self._post(self._dod_failed, str(e))
@@ -2060,13 +2054,12 @@ class App:
                     mcap = contracts.market_cap_from_finnhub(sym, fkey)
                     summary = contracts.summarize_contracts(cs)
                     return contracts.contract_signal(summary, market_cap=mcap)
-                def _dod_awards():
-                    # Today's defense.gov awards matching this ticker, scored vs market cap
+                def _dod():
                     awards = dod_scraper.dod_daily_awards()
-                    if not awards or not any(x.get("ticker") == sym for x in awards):
+                    if not any(a.get("ticker") == sym for a in awards):
                         return None
                     mcap = contracts.market_cap_from_finnhub(sym, fkey)
-                    return dod_scraper.dod_ticker_signal(awards, sym, mcap)
+                    return dod_scraper.dod_signal_for_ticker(awards, sym, mcap)
                 jobs = {
                     "recs": lambda: qe.finnhub_recs(sym, fkey),
                     "congress": lambda: qe.quiver_congress(sym, qtok),
@@ -2081,7 +2074,7 @@ class App:
                     "filings": lambda: edgar.recent_filings(sym, days=3),
                     "insider_form4": lambda: edgar.form4_insider_bias(sym),
                     "contracts": _contracts,
-                    "dod_awards": _dod_awards,
+                    "dod": _dod,
                 }
                 akey, asec = alpaca_keys()
                 if akey and asec:                       # real dark-pool block flow (SIP)
@@ -2097,7 +2090,8 @@ class App:
                 recs, congress = out.get("recs"), out.get("congress")
                 insiders, whale, market = out.get("insiders"), out.get("whale"), out.get("market")
                 gov_contracts = out.get("contracts")
-                dod_awards = out.get("dod_awards")
+                dod_awards = out.get("dod")
+                res["dod_awards"] = dod_awards          # read by confirmation.confirm()
                 res["fund"] = out.get("fund"); sentiment = out.get("sentiment")
                 res["orderflow"] = out.get("orderflow")
                 res["filings"] = out.get("filings")

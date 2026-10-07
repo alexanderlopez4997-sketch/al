@@ -354,6 +354,29 @@ check("confirm flags unresolved high-impact 8-K without killing",
       any(l == "No unresolved high-impact 8-K" and s == "fail" for l, s, _ in cs_hi8k["checks"])
       and not any("8-K" in l for l, _ in cs_hi8k["kills"]))
 
+check("confirm exposes a level for the UI",
+      cs["level"] == "verified" and csk["level"] == "kill" and cf.confirm(dict(verified, verdict={"tone": "bad", "label": "SELL"}))["level"] == "none")
+
+# web_server green-signal banner
+import web_server as _ws
+_banner = _ws._confirmation_html(verified)
+check("web banner shows VERIFIED headline for a confluence BUY", "VERIFIED" in _banner and "signals agree" in _banner)
+_kb = _ws._confirmation_html(dict(killed, filings=[{"form": "424B5", "note": "<b>x</b>", "bias": -1}]))
+check("web banner lists kill-switches, HTML-escaped", "NOT VERIFIED" in _kb and "<b>x</b>" not in _kb)
+check("web banner empty when not a BUY", _ws._confirmation_html(dict(verified, verdict={"tone": "bad", "label": "SELL"})) == "")
+check("web banner never raises on junk", _ws._confirmation_html({}) == "")
+
+# DoD award check: confirms on a meaningful award, n/a on none/noise, never a kill
+dod_ok = dict(verified); dod_ok["dod_awards"] = {"signal": 0.4, "confidence": 0.9, "detail": "$250M DoD award"}
+check("confirm passes DoD award check on a meaningful award",
+      any(l == "DoD contract award today" and s == "pass" for l, s, _ in cf.confirm(dod_ok)["checks"]))
+dod_noise = dict(verified); dod_noise["dod_awards"] = {"signal": 0.01, "confidence": 0.05, "detail": "$5M"}
+check("confirm marks DoD award na when it is noise",
+      any(l == "DoD contract award today" and s == "na" for l, s, _ in cf.confirm(dod_noise)["checks"]))
+check("confirm marks DoD award na when absent, and never kills on it",
+      any(l == "DoD contract award today" and s == "na" for l, s, _ in cf.confirm(verified)["checks"])
+      and not any("DoD" in l for l, _ in cf.confirm(dod_ok)["kills"]))
+
 # ------------------------------------------------------------- trackrecord --
 section("trackrecord")
 _tmp = tempfile.mktemp(suffix=".json")
@@ -1034,20 +1057,20 @@ _bulk = dod_scraper.dod_bulk_score(_dod_awards)
 check("DoD bulk scoring returns dict", isinstance(_bulk, dict))
 check("DoD bulk scoring includes tickers", all(k in ["LMT", "BA"] for k in _bulk.keys()))
 
-# Test per-ticker blend (used by the desktop Analyze tab)
-_tk_sig = dod_scraper.dod_ticker_signal(_dod_awards, "LMT", 1e9)
-check("DoD ticker signal returns a scored dict for a matching ticker",
-      _tk_sig is not None and -1 <= _tk_sig["signal"] <= 1)
-check("DoD ticker signal is None for a ticker with no award",
-      dod_scraper.dod_ticker_signal(_dod_awards, "ZZZZ", 1e9) is None)
-check("DoD ticker signal is None without market cap",
-      dod_scraper.dod_ticker_signal(_dod_awards, "LMT", None) is None)
-_two = [{"ticker": "LMT", "value_usd": 50e6, "contractor": "Lockheed", "date": "2026-10-06"},
-        {"ticker": "LMT", "value_usd": 100e6, "contractor": "Lockheed", "date": "2026-10-06"}]
-check("DoD ticker signal averages multiple awards",
-      dod_scraper.dod_ticker_signal(_two, "LMT", 1e9)["detail"] == "2 DoD awards")
-
 # Test cron scheduling
+# annotate_awards: live page needs per-award signal/confidence (was always 0 before)
+_ann = dod_scraper.annotate_awards([dict(a) for a in _dod_awards], lambda tk: 1e9)
+check("DoD annotate_awards scores awards with a ticker",
+      all(a["signal"] is not None and 0 <= a["confidence"] <= 1 for a in _ann if a.get("ticker")))
+_ann_none = dod_scraper.annotate_awards([dict(a) for a in _dod_awards], lambda tk: None)
+check("DoD annotate_awards leaves signal None without market cap (shows n/a, not 0)",
+      all(a["signal"] is None for a in _ann_none))
+_one = dod_scraper.dod_signal_for_ticker(_dod_awards, "LMT", 1e9)
+check("DoD dod_signal_for_ticker returns signal for matching ticker", _one is not None and _one["signal"] > 0)
+check("DoD dod_signal_for_ticker None for no match / no market cap",
+      dod_scraper.dod_signal_for_ticker(_dod_awards, "ZZZZ", 1e9) is None
+      and dod_scraper.dod_signal_for_ticker(_dod_awards, "LMT", None) is None)
+
 _cron = dod_scraper.schedule_dod_scraper()
 check("DoD scheduler returns cron expression (5pm ET, weekdays)", "0 17" in _cron and "1-5" in _cron)
 
