@@ -1250,7 +1250,7 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
    font-size:14px;display:flex;flex-direction:column;height:100vh}
  .top{display:flex;align-items:center;gap:14px;background:var(--panel);padding:10px 18px;border-bottom:2px solid var(--gold)}
  .diamond{color:var(--gold);font-size:22px}.brand{font-family:Georgia,serif;font-weight:700;font-size:20px;letter-spacing:1px}
- .sublabel{color:var(--gold);font-size:9px;letter-spacing:2px}.spacer{flex:1}
+ .sublabel{color:var(--gold);font-size:8px;letter-spacing:1px}.spacer{flex:1}
  .clock{font-family:ui-monospace,Menlo,monospace;font-weight:700}.pill{background:var(--panel2);color:var(--dim);padding:3px 10px;border-radius:3px;font-size:11px;letter-spacing:1px}
  .feeds{display:flex;gap:14px;background:var(--panel2);padding:5px 18px;border-bottom:1px solid var(--line);font-size:11px;letter-spacing:1px;align-items:center}
  .feed.on{color:var(--buy)}.feed.off{color:#3A4657}.lbl{color:var(--dim)}.stream{margin-left:auto;color:var(--buy)}
