@@ -404,6 +404,31 @@ def _is_contract_release(title, body):
 _VALUE_RE = re.compile(r'\$\s*(\d[\d,]*(?:\.\d+)?)\s*(billion|million|thousand)?', re.I)
 _UNIT = {"billion": 1e9, "million": 1e6, "thousand": 1e3}
 
+# How much of a CEILING (IDIQ / multiple-award / blanket-purchase / "not-to-exceed")
+# counts toward the signal when no funds are reported obligated at award. A ceiling is
+# the most the government MAY order over the contract's life; the firm money at award is
+# usually a token minimum, so counting it at face value would let a $4B shared vehicle
+# outweigh a $200M definite contract. A judgment call, not backtested — tune freely.
+CEILING_WEIGHT = 0.10
+
+# Counted award value as a fraction of the contractor's market cap that earns a FULL +1.0
+# signal; smaller awards scale linearly below it. 0.1% of market cap = full signal (so a
+# $65M award to a $65B company, or $1B to a $1T one, maxes out). Set to 1.0 to get the old
+# behavior: signal = the raw award/market-cap ratio, the same convention as
+# contracts.contract_signal() (the Quiver gov-contracts signal).
+DOD_FULL_SIGNAL_RATIO = 0.001
+
+
+def _first_amount(text):
+    """(usd, start, end) of the first dollar amount in `text`, or None."""
+    for m in _VALUE_RE.finditer(text or ""):
+        try:
+            amount = float(m.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        return amount * _UNIT.get((m.group(2) or "").lower(), 1.0), m.start(), m.end()
+    return None
+
 
 def _extract_award_value(text):
     """First dollar amount in `text`, in USD (float), or None.
@@ -411,13 +436,135 @@ def _extract_award_value(text):
     Handles "$1.2 billion", "$125.5 million", "$199,303,678". Takes the first amount in
     reading order (a paragraph's headline value comes before any cumulative total or
     obligated-funds figure) — not the first unit that happens to appear anywhere."""
-    for m in _VALUE_RE.finditer(text or ""):
-        try:
-            amount = float(m.group(1).replace(",", ""))
-        except ValueError:
+    hit = _first_amount(text)
+    return hit[0] if hit else None
+
+
+_CEILING_RE = re.compile(
+    r"indefinite[- ]delivery|\bidiq\b|multiple[- ]award|\bceiling\b|not[- ]to[- ]exceed|"
+    r"potential value|blanket purchase agreement|basic ordering agreement", re.I)
+_OBLIGATED_AT_AWARD_RE = re.compile(r"obligat\w*[^.]{0,40}\b(?:at|upon)\b[^.]{0,20}\baward\b", re.I)
+_NO_FUNDS_RE = re.compile(r"\bno\b[^.]{0,60}\b(?:funds|money|dollars)\b|\bnone of\b", re.I)
+
+
+def _classify_value(par, amt_start, amt_end):
+    """'definite' or 'ceiling' for the headline amount at par[amt_start:amt_end].
+
+    DoD announces two very different things under one "$X":
+      definite  a firm award, a modification, or a task/delivery order — real, committed work
+      ceiling   the maximum an IDIQ / multiple-award / blanket-purchase vehicle may reach
+                over its life; actual money arrives later as orders
+    Reads the contract-type phrase right around the amount, not the whole paragraph, so
+    work placed UNDER an IDIQ still counts as definite:
+      "$30M modification to a previously awarded IDIQ"        -> definite
+      "$30M firm-fixed-price task order against an IDIQ"      -> definite
+      "$90M multiple-award task order contract"               -> ceiling (that's the vehicle)
+      "$4B indefinite-delivery/indefinite-quantity contract"  -> ceiling
+      "... a maximum ceiling of $500M"                        -> ceiling"""
+    before = par[max(0, amt_start - 40):amt_start].lower()
+    after = par[amt_end:amt_end + 120].lower()
+    if re.search(r"\bmodification\b|\boption\b", after[:70]):
+        return "definite"
+    to = re.search(r"\b(?:task|delivery) order\b", after[:80])
+    if to:
+        return "ceiling" if _CEILING_RE.search(after[:to.start()]) else "definite"
+    if _CEILING_RE.search(before) or _CEILING_RE.search(after):
+        return "ceiling"
+    return "definite"
+
+
+def _obligated_at_award(par):
+    """Dollars the paragraph says are obligated AT TIME OF AWARD (summed over its amounts),
+    0.0 if it says no funds are, or None if it says nothing (or defers funding to later
+    orders: 'obligated as task orders are issued' is not money at award)."""
+    total, seen = 0.0, False
+    for sent in re.split(r"(?<=[a-z0-9\)])\.\s+(?=[A-Z])", par):
+        if not _OBLIGATED_AT_AWARD_RE.search(sent):
             continue
-        return amount * _UNIT.get((m.group(2) or "").lower(), 1.0)
-    return None
+        if _NO_FUNDS_RE.search(sent):
+            return 0.0
+        for m in _VALUE_RE.finditer(sent):
+            seen = True
+            total += float(m.group(1).replace(",", "")) * _UNIT.get((m.group(2) or "").lower(), 1.0)
+    return total if seen else None
+
+
+_IDIQ_RE = re.compile(r"\bidiq\b|indefinite[- ]delivery|multiple[- ]award|blanket purchase agreement|"
+                      r"basic ordering agreement", re.I)
+_CEILING_WORD_RE = re.compile(r"\bceiling\b|maximum (?:potential )?value|potential value|not[- ]to[- ]exceed|\bnte\b", re.I)
+_MOD_RE = re.compile(r"\bmodification\b|\bmod\s*p\d|\bamendment\b", re.I)
+
+
+def parse_contract_financial_obligations(description_text, headline_value, n_awardees=1):
+    """Separate what DoD ANNOUNCED from what is actually worth counting.
+
+    DoD headlines are often IDIQ / multiple-award ceilings (the most the government may
+    order over years), not cash. This reads the award paragraph and returns the
+    "realized economic value" a signal should use:
+
+      funds obligated at award stated   -> that amount (capped at the headline), any contract type
+      ceiling vehicle, nothing stated   -> headline x CEILING_WEIGHT (default 10%)
+      ceiling vehicle, "no funds at award" -> 0
+      firm award / modification / task order, nothing stated -> the full headline
+
+    A modification or task order UNDER an IDIQ is real money and is not discounted — the
+    vehicle is judged by the contract-type phrase at the headline amount, not by any
+    IDIQ wording elsewhere in the paragraph. `n_awardees` shares the paragraph's
+    obligated total evenly across joint awardees (headline_value is per awardee).
+
+    Returns {headline_value, obligated_value, realized_economic_value, vehicle_weight,
+    is_idiq, is_ceiling, is_modification, kind, detail}. `vehicle_weight` (IDIQ 0.25,
+    modification 0.80, else 1.0) is informational — the discount is already in
+    realized_economic_value, so multiplying by it again would double-count."""
+    text = " ".join((description_text or "").split())
+    headline = float(headline_value or 0.0)
+
+    # locate the headline amount in the text (first one equal to it, else the first)
+    amt = None
+    for m in _VALUE_RE.finditer(text):
+        v = float(m.group(1).replace(",", "")) * _UNIT.get((m.group(2) or "").lower(), 1.0)
+        if amt is None:
+            amt = m
+        if abs(v - headline) <= max(1.0, headline * 1e-9) or abs(v / max(n_awardees, 1) - headline) <= 1.0:
+            amt = m
+            break
+    kind = _classify_value(text, amt.start(), amt.end()) if amt else "definite"
+
+    raw_obl = _obligated_at_award(text)
+    obligated = None if raw_obl is None else min(raw_obl / max(n_awardees, 1), headline)
+
+    if obligated is not None and obligated > 0:
+        realized, detail = obligated, f"${obligated:,.0f} obligated at award (headline ${headline:,.0f})"
+    elif kind == "ceiling" and obligated == 0:
+        realized, detail = 0.0, f"Ceiling vehicle, no funds obligated at award (headline ${headline:,.0f})"
+    elif kind == "ceiling":
+        realized = headline * CEILING_WEIGHT
+        detail = (f"Ceiling vehicle: headline ${headline:,.0f} discounted to "
+                  f"${realized:,.0f} (no funds reported at award)")
+    else:
+        realized = headline
+        detail = f"Firm award: ${headline:,.0f}"
+
+    is_mod = bool(_MOD_RE.search(text))
+    return {
+        "headline_value": headline,
+        "obligated_value": obligated,
+        "realized_economic_value": realized,
+        "vehicle_weight": 0.25 if kind == "ceiling" else (0.80 if is_mod else 1.0),
+        "is_idiq": bool(_IDIQ_RE.search(text)),
+        "is_ceiling": bool(_CEILING_WORD_RE.search(text)) or kind == "ceiling",
+        "is_modification": is_mod,
+        "kind": kind,
+        "detail": detail,
+    }
+
+
+def award_counted_usd(award):
+    """The dollar value an award contributes to a signal: `effective_value_usd` if the
+    scraper set it (ceilings discounted / replaced by obligated funds), else the face
+    `value_usd` (demo data, legacy-path awards)."""
+    v = award.get("effective_value_usd")
+    return award.get("value_usd", 0) if v is None else v
 
 
 # "<awardees> is/was/are/has been/have been (each) awarded|selected ..." — the verb phrase
@@ -458,7 +605,8 @@ def _awardee_name(chunk):
 
 
 def _parse_award_paragraph(par):
-    """One award paragraph -> {awardees:[names], each:bool, value:float, text:str} or None.
+    """One award paragraph -> {awardees:[names], each:bool, value:float, text:str,
+    kind:'definite'|'ceiling', obligated:float|None} or None.
 
     Works on the DoD release shape, where each award is one paragraph:
       "<Name>, <City>, <State>, is awarded a $<amount> ... contract ..."
@@ -474,9 +622,13 @@ def _parse_award_paragraph(par):
     lead = par[:m.start()].strip(" ,;")
     if not (3 <= len(lead) <= 600) or not lead.lstrip("* ")[:1].isalnum():
         return None
-    value = _extract_award_value(par[m.end():])
-    if not value:
+    tail = par[m.end():]
+    hit = _first_amount(tail)
+    if not hit:
         return None
+    value = hit[0]
+    kind = _classify_value(tail, hit[1], hit[2])
+    obligated = _obligated_at_award(par)
     names = []
     for chunk in _AWARDEE_SPLIT_RE.split(lead):
         n = _awardee_name(chunk)
@@ -484,7 +636,8 @@ def _parse_award_paragraph(par):
             names.append(n)
     if not names:
         return None
-    return {"awardees": names, "each": "each" in m.group(0).lower(), "value": value, "text": par}
+    return {"awardees": names, "each": "each" in m.group(0).lower(), "value": value, "text": par,
+            "kind": kind, "obligated": obligated}
 
 
 def _extract_contractor_legacy(text):
@@ -550,13 +703,19 @@ def _awards_from_text_blocks(blocks, title, date):
             per = total if (parsed["each"] or len(names) == 1) else total / len(names)
             if per < 1e6:  # ignore sub-$1M (noise)
                 continue
+            fin = parse_contract_financial_obligations(parsed["text"], per, n_awardees=len(names))
+            effective, obl, kind = fin["realized_economic_value"], fin["obligated_value"], fin["kind"]
             for name in names:
                 out.append({
                     "title": title,
                     "contractor": name,
                     "ticker": _contractor_to_ticker(name),
-                    "value_usd": per,
+                    "value_usd": per,                # face value (per awardee)
                     "value_total_usd": total,
+                    "value_kind": kind,
+                    "obligated_usd": obl,
+                    "effective_value_usd": effective,  # what a signal counts
+                    "vehicle_weight": fin["vehicle_weight"],  # informational (IDIQ 0.25, mod 0.80); not applied
                     "n_awardees": len(names),
                     "date": date,
                     "description": parsed["text"][:500],
@@ -668,7 +827,8 @@ def dod_award_signal(award, ticker=None, market_cap=None, ttm_revenue=None):
     Returns:
       {signal, confidence, detail} or None if no market data
     """
-    if not award or award.get("value_usd", 0) <= 0:
+    counted = award_counted_usd(award) if award else 0
+    if not award or counted <= 0:
         return None
 
     tk = ticker or award.get("ticker")
@@ -676,39 +836,68 @@ def dod_award_signal(award, ticker=None, market_cap=None, ttm_revenue=None):
     if fundamentals is None or fundamentals <= 0:
         return None
 
-    ratio = award["value_usd"] / fundamentals
-    ratio = float(np.clip(ratio, -1, 1))
+    # Signal: counted value vs. market cap, saturating at DOD_FULL_SIGNAL_RATIO (not a noise
+    # floor: this is the size at which the signal is already maxed out).
+    signal = float(np.clip(counted / fundamentals / DOD_FULL_SIGNAL_RATIO, -1, 1))
 
-    if abs(ratio) < 0.001:  # sub-0.1% is noise
-        return None
+    # Confidence: counted value ($100M = full) x freshness (DoD awards are TODAY, so no
+    # decay yet). Not also scaled by vehicle_weight: a ceiling's discount is already in
+    # the counted value, and applying it twice would punish an unfunded IDIQ at ~2.5%.
+    val_conf = min(1.0, counted / 1e8)
+    recency = 1.0
+    confidence = val_conf * recency
 
-    # Confidence: award value + freshness (DoD awards are TODAY, so max decay)
-    val_conf = min(1.0, award["value_usd"] / 1e8)  # $100M = full confidence
-    recency = 1.0  # Today's award = max recency (no decay yet)
+    face = award.get("value_usd", counted)
+    if award.get("value_kind") == "ceiling":
+        basis = (f"${counted/1e6:.0f}M obligated of a ${face/1e6:.0f}M ceiling"
+                 if award.get("obligated_usd") is not None
+                 else f"${counted/1e6:.0f}M counted of a ${face/1e6:.0f}M ceiling (no funds reported at award)")
+        detail = f"{basis} · DoD award to {award.get('contractor', '?')} · {award.get('date', '?')}"
+    else:
+        detail = (f"${counted/1e6:.0f}M DoD award to {award.get('contractor', '?')} "
+                  f"· {award.get('date', '?')}")
+    return {"signal": signal, "confidence": float(confidence), "detail": detail}
 
-    return {
-        "signal": ratio,
-        "confidence": val_conf * recency,
-        "detail": (f"${award['value_usd']/1e6:.0f}M DoD award to {award.get('contractor', '?')} "
-                   f"· {award.get('date', '?')}"),
-    }
+
+def enhanced_dod_award_signal(award_record, market_cap):
+    """(signal, confidence) for one award, using its realized economic value rather than
+    the raw ceiling. (0.0, 0.0) when there is no market cap or nothing counts — an explicit
+    zero (a ceiling with no funds obligated at award) stays zero; it does NOT fall back to
+    the headline value.
+
+    Awards from dod_daily_awards() already carry their parsed breakdown, which is used as
+    is — re-parsing `description` would lose the obligated-funds clause (it is cut to 500
+    characters) and the joint-awardee split. A bare record with only a description and
+    headline value is parsed here instead. dod_award_signal() is the same scoring with a
+    {signal, confidence, detail} result (what alt_data_tilt consumes)."""
+    if not market_cap or market_cap <= 0:
+        return 0.0, 0.0
+    rec = dict(award_record or {})
+    if rec.get("effective_value_usd") is None:
+        fin = parse_contract_financial_obligations(rec.get("description", ""), rec.get("value_usd", 0.0))
+        rec.update(effective_value_usd=fin["realized_economic_value"], vehicle_weight=fin["vehicle_weight"],
+                   value_kind=fin["kind"], obligated_usd=fin["obligated_value"])
+    sig = dod_award_signal(rec, market_cap=market_cap)
+    return (sig["signal"], sig["confidence"]) if sig else (0.0, 0.0)
 
 
 def _combined_award(awards, ticker):
-    """All of `ticker`'s awards collapsed into one pseudo-award whose value is their
-    sum — same-day awards stack, so $100M + $60M is a $160M catalyst, not two $100M-ish
-    ones averaged. None if the ticker has no positive-value award."""
-    mine = [a for a in awards if a.get("ticker") == ticker and (a.get("value_usd") or 0) > 0]
+    """All of `ticker`'s awards collapsed into one pseudo-award whose value is the SUM of
+    their counted values (same-day awards stack: $100M + $60M is a $160M catalyst, not two
+    averaged ones; ceilings already discounted). None if nothing counts."""
+    mine = [a for a in awards if a.get("ticker") == ticker and award_counted_usd(a) > 0]
     if not mine:
         return None
     return {"ticker": ticker, "contractor": mine[0].get("contractor"), "date": mine[0].get("date"),
-            "value_usd": sum(a["value_usd"] for a in mine), "n": len(mine)}
+            "value_usd": sum(award_counted_usd(a) for a in mine),
+            "face_usd": sum(a.get("value_usd", 0) for a in mine), "n": len(mine)}
 
 
 def _combined_signal(combo, **fundamentals):
     sig = dod_award_signal(combo, ticker=combo["ticker"], **fundamentals)
     if sig and combo["n"] > 1:
-        sig["detail"] = f"{combo['n']} DoD awards totaling ${combo['value_usd']/1e6:.0f}M"
+        sig["detail"] = (f"{combo['n']} DoD awards, ${combo['value_usd']/1e6:.0f}M counted"
+                         + (f" of ${combo['face_usd']/1e6:.0f}M face" if combo["face_usd"] > combo["value_usd"] * 1.01 else ""))
     return sig
 
 
