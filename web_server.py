@@ -843,6 +843,69 @@ def _dod_awards_html(demo):
               'contractor market cap. Sentiment reflects 1-day news coverage.</div>'}
 
 
+# ------------------------------------------------------ gov contracts panel ---
+def _gov_contracts_html(tickers, demo):
+    """Dashboard panel: recent federal contracts (Quiver) for the watchlist plus any
+    of today's DoD awards that map to a watchlist ticker. Returns {"html": ...}."""
+    if demo:
+        cards = [
+            {"ticker": "LMT", "agency": "Dept. of Defense", "value": 180_000_000, "date": "2026-10-06",
+             "description": "Satellite communications platform", "n": 3, "signal": 0.35, "src": "QUIVER"},
+            {"ticker": "PLTR", "agency": "U.S. Army", "value": 95_000_000, "date": "2026-10-02",
+             "description": "Data integration and analytics services", "n": 2, "signal": 0.12, "src": "QUIVER"},
+        ]
+    else:
+        fkey = qe.FINNHUB_DEFAULT_KEY
+        qtok = os.environ.get("QUIVER_API_TOKEN")
+        cards = []
+
+        def one(t):
+            cs = _try(lambda: contracts.quiver_contracts(t, qtok), []) if qtok else []
+            if not cs:
+                return
+            summ = contracts.summarize_contracts(cs)
+            if not summ["latest"]:
+                return
+            top = summ["latest"][0]
+            mcap = _try(lambda: contracts.market_cap_from_finnhub(t, fkey))
+            sig = contracts.contract_signal(summ, market_cap=mcap)
+            cards.append({"ticker": t, "agency": top["agency"], "value": summ["value_recent"],
+                          "date": top["date"], "description": top["description"],
+                          "n": summ["count_recent"], "signal": sig["signal"] if sig else None,
+                          "src": "QUIVER"})
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(one, tickers))
+
+        seen = {c["ticker"] for c in cards}
+        awards = _try(lambda: dod_scraper.dod_daily_awards(), [])
+        for a in awards or []:
+            tk = a.get("ticker")
+            if tk and tk in tickers and tk not in seen:
+                cards.append({"ticker": tk, "agency": "Dept. of Defense", "value": a.get("value_usd", 0),
+                              "date": a.get("date", "today"), "description": a.get("description", ""),
+                              "n": 1, "signal": None, "src": "DoD"})
+        if not qtok and not cards:
+            return {"html": '<div class="muted">Set QUIVER_API_TOKEN to see federal contracts for your watchlist.</div>'}
+
+    if not cards:
+        return {"html": '<div class="muted">No recent government contracts for your watchlist.</div>'}
+
+    cards.sort(key=lambda c: -(c["value"] or 0))
+    rows = ""
+    for c in cards:
+        sig = c["signal"]
+        sig_txt = f'<span class="tagpill" style="color:#B15CDE">signal {sig:+.2f}</span>' if sig is not None \
+            else f'<span class="tagpill">{c["src"]}</span>'
+        n_txt = f' · {c["n"]} awards' if c["n"] > 1 else ""
+        rows += (f'<div class="ohcard" style="border-left:3px solid #B15CDE">'
+                 f'<div class="ohh"><span><b style="color:#B15CDE">{_html.escape(c["ticker"])}</b> '
+                 f'<span style="color:#A8D8EA">{_html.escape(str(c["agency"]))}</span></span>{sig_txt}</div>'
+                 f'<div class="sub" style="color:#B8C5D6">{_fmt_usd_k(c["value"])}{n_txt}'
+                 f'{" · " + _html.escape(c["description"]) if c["description"] else ""}</div>'
+                 f'<div class="sub" style="color:#9B9FAE">📅 {_html.escape(str(c["date"]))}</div></div>')
+    return {"html": rows}
+
+
 # ------------------------------------------------------------ track record ---
 def _trackrecord_html():
     tickers = sorted({e["ticker"] for e in tr._load()})
@@ -983,6 +1046,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(json.dumps(_recent_news_html(tks, demo)))
             if u.path == "/api/dod_awards":
                 return self._send(json.dumps(_dod_awards_html(demo)))
+            if u.path == "/api/gov_contracts":
+                return self._send(json.dumps(_gov_contracts_html(tks, demo)))
             if u.path == "/api/trackrecord":
                 return self._send(json.dumps(_trackrecord_html()))
             if u.path == "/api/screen":
@@ -1289,6 +1354,7 @@ async function refresh(){$('wlnote').textContent='updating…';
   fetch('/api/watchlist?demo='+demo()+'&tickers='+wl()).then(r=>r.json()),
   fetch('/api/categories').then(r=>r.json()),
   fetch('/api/news?demo='+demo()+'&tickers='+wl()).then(r=>r.json())]);
+  const gov=await fetch('/api/gov_contracts?demo='+demo()+'&tickers='+wl()).then(r=>r.json()).catch(()=>({}));
   if(!Array.isArray(d)){$('main').innerHTML='<div class="card" style="color:var(--sell)">Watchlist unavailable: '+((d&&d.error)||'unexpected response')+'</div>';$('wlnote').textContent='';return;}
   let h='<div style="padding:0"><h2 style="color:var(--gold);margin:0 0 12px;font-size:16px">YOUR WATCHLIST</h2>';
   h+='<div class="wgrid">';for(const r of d){const c=r.tone==='good'?'g':r.tone==='bad'?'b':'n';
@@ -1299,8 +1365,11 @@ async function refresh(){$('wlnote').textContent='updating…';
      <div class="p">${r.last} <span style="color:${cc}">${r.chg>=0?'+':''}${r.chg}%</span></div>
      <div class="v" style="color:${r.tone==='good'?'var(--buy)':r.tone==='bad'?'var(--sell)':'var(--amber)'}">${r.verdict}</div></div>`;}
   h+='</div>';
-  h+='<h2 style="color:var(--gold);margin:20px 0 12px;font-size:16px">RECENT NEWS & SENTIMENT</h2>';
-  if(news.html){h+=news.html;}else{h+='<div class="muted">No news data available.</div>';}
+  h+='<div class="ahsplit" style="margin-top:20px"><section><h2>RECENT NEWS & SENTIMENT</h2>';
+  h+=news.html?news.html:'<div class="muted">No news data available.</div>';
+  h+='</section><section><h2>GOVERNMENT CONTRACTS</h2>';
+  h+=gov.html?gov.html:'<div class="muted">'+(gov.error||'Government contracts unavailable.')+'</div>';
+  h+='</section></div>';
   h+='<h2 style="color:var(--gold);margin:20px 0 12px;font-size:16px">DISCOVER BY STRATEGY</h2>';
   h+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
   for(const[k,v]of Object.entries(cats)){
