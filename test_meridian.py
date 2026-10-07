@@ -1304,7 +1304,10 @@ check("a huge award can't push the signal past +1",
       dod_scraper.dod_award_signal({"value_usd": 5e10, "contractor": "X"}, market_cap=1e10)["signal"] == 1.0)
 _cw = dod_scraper.dod_award_signal({"value_usd": 200e6, "contractor": "X", "vehicle_weight": 0.25}, market_cap=1e10)
 _c1 = dod_scraper.dod_award_signal({"value_usd": 200e6, "contractor": "X"}, market_cap=1e10)
-check("confidence is scaled by vehicle_weight (IDIQ 0.25 vs firm 1.0)", abs(_cw["confidence"] - 0.25 * _c1["confidence"]) < 1e-12)
+check("confidence is NOT scaled by vehicle_weight (the ceiling discount is already in the counted value)",
+      _cw["confidence"] == _c1["confidence"] == 1.0)
+check("confidence is min(1, counted / $100M)",
+      abs(dod_scraper.dod_award_signal({"value_usd": 25e6, "contractor": "X"}, market_cap=1e10)["confidence"] - 0.25) < 1e-12)
 _tup = dod_scraper.enhanced_dod_award_signal(_cd[2], 1e12)
 check("enhanced_dod_award_signal -> (signal, confidence) tuple matching dod_award_signal",
       isinstance(_tup, tuple) and _tup == (dod_scraper.dod_award_signal(_cd[2], market_cap=1e12)["signal"],
@@ -1316,16 +1319,16 @@ check("enhanced_dod_award_signal: (0.0, 0.0) with no market cap or nothing count
 _bare = {"description": "Acme Inc., Dayton, Ohio, is awarded a $4,000,000,000 indefinite-delivery/indefinite-quantity contract.",
          "value_usd": 4e9}
 _bs, _bc = dod_scraper.enhanced_dod_award_signal(_bare, 1e12)
-check("enhanced_dod_award_signal parses a bare description+headline record (ceiling haircut and 0.25 weight)",
-      abs(_bs - 4e9 * dod_scraper.CEILING_WEIGHT / 1e12 / _R) < 1e-12 and abs(_bc - 0.25) < 1e-12)
+check("enhanced_dod_award_signal parses a bare description+headline record (ceiling haircut)",
+      abs(_bs - 4e9 * dod_scraper.CEILING_WEIGHT / 1e12 / _R) < 1e-12 and _bc == 1.0)
+check("an explicit zero stays zero: it does not fall back to the headline value",
+      dod_scraper.enhanced_dod_award_signal({"value_usd": 400e6, "effective_value_usd": 0.0}, 1e12) == (0.0, 0.0)
+      and dod_scraper.dod_award_signal({"value_usd": 400e6, "effective_value_usd": 0.0}, market_cap=1e12) is None)
 check("stored breakdown is used as-is: an obligation past the 500-char description cut is not lost",
       dod_scraper.enhanced_dod_award_signal(
           dict(_bare, description=_bare["description"][:40], effective_value_usd=7e6, vehicle_weight=0.25), 1e12)[0]
       == 7e6 / 1e12 / _R)
-_cmb = dod_scraper._combined_award([dict(_cd[1], ticker="Q"), dict(_cd[2], ticker="Q")], "Q")
-check("per-ticker confidence weight follows where the counted dollars came from (firm dominates ceiling)",
-      _cmb["vehicle_weight"] > 0.9 and abs(_cmb["vehicle_weight"] - (40e6 * 0.25 + 400e6 * 1.0) / 440e6) < 1e-9)
-check("scraped awards carry vehicle_weight (ceiling 0.25, firm 1.0)",
+check("scraped awards carry vehicle_weight as an informational field (ceiling 0.25, firm 1.0)",
       _cb["Beta"]["vehicle_weight"] == 0.25 and _cb["Gamma"]["vehicle_weight"] == 1.0)
 
 # value extraction: first amount in reading order

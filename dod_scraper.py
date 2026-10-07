@@ -715,7 +715,7 @@ def _awards_from_text_blocks(blocks, title, date):
                     "value_kind": kind,
                     "obligated_usd": obl,
                     "effective_value_usd": effective,  # what a signal counts
-                    "vehicle_weight": fin["vehicle_weight"],  # confidence multiplier (IDIQ 0.25, mod 0.80)
+                    "vehicle_weight": fin["vehicle_weight"],  # informational (IDIQ 0.25, mod 0.80); not applied
                     "n_awardees": len(names),
                     "date": date,
                     "description": parsed["text"][:500],
@@ -836,14 +836,16 @@ def dod_award_signal(award, ticker=None, market_cap=None, ttm_revenue=None):
     if fundamentals is None or fundamentals <= 0:
         return None
 
-    # Signal: counted value vs. market cap, saturating at DOD_FULL_SIGNAL_RATIO.
+    # Signal: counted value vs. market cap, saturating at DOD_FULL_SIGNAL_RATIO (not a noise
+    # floor: this is the size at which the signal is already maxed out).
     signal = float(np.clip(counted / fundamentals / DOD_FULL_SIGNAL_RATIO, -1, 1))
 
-    # Confidence: counted value ($100M = full) x contract-vehicle weight (IDIQ 0.25,
-    # modification 0.80, else 1.0) x freshness (DoD awards are TODAY, so no decay yet).
+    # Confidence: counted value ($100M = full) x freshness (DoD awards are TODAY, so no
+    # decay yet). Not also scaled by vehicle_weight: a ceiling's discount is already in
+    # the counted value, and applying it twice would punish an unfunded IDIQ at ~2.5%.
     val_conf = min(1.0, counted / 1e8)
     recency = 1.0
-    confidence = val_conf * float(award.get("vehicle_weight", 1.0)) * recency
+    confidence = val_conf * recency
 
     face = award.get("value_usd", counted)
     if award.get("value_kind") == "ceiling":
@@ -859,7 +861,9 @@ def dod_award_signal(award, ticker=None, market_cap=None, ttm_revenue=None):
 
 def enhanced_dod_award_signal(award_record, market_cap):
     """(signal, confidence) for one award, using its realized economic value rather than
-    the raw ceiling. (0.0, 0.0) when there is no market cap or nothing counts.
+    the raw ceiling. (0.0, 0.0) when there is no market cap or nothing counts — an explicit
+    zero (a ceiling with no funds obligated at award) stays zero; it does NOT fall back to
+    the headline value.
 
     Awards from dod_daily_awards() already carry their parsed breakdown, which is used as
     is — re-parsing `description` would lose the obligated-funds clause (it is cut to 500
@@ -884,12 +888,9 @@ def _combined_award(awards, ticker):
     mine = [a for a in awards if a.get("ticker") == ticker and award_counted_usd(a) > 0]
     if not mine:
         return None
-    counted = sum(award_counted_usd(a) for a in mine)
     return {"ticker": ticker, "contractor": mine[0].get("contractor"), "date": mine[0].get("date"),
-            "value_usd": counted,
-            "face_usd": sum(a.get("value_usd", 0) for a in mine), "n": len(mine),
-            # a ticker's confidence weight follows where its counted dollars came from
-            "vehicle_weight": sum(award_counted_usd(a) * a.get("vehicle_weight", 1.0) for a in mine) / counted}
+            "value_usd": sum(award_counted_usd(a) for a in mine),
+            "face_usd": sum(a.get("value_usd", 0) for a in mine), "n": len(mine)}
 
 
 def _combined_signal(combo, **fundamentals):
