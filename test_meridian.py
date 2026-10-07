@@ -1262,8 +1262,8 @@ _lmt_all = [a for a in _day if a["ticker"] == "LMT"]
 _sum = dod_scraper.dod_signal_for_ticker(_day, "LMT", 100e9)
 check("DoD per-ticker signal sums that ticker's awards (counted value)",
       _sum is not None and "DoD awards," in _sum["detail"]
-      and abs(_sum["signal"] - min(1.0, sum(dod_scraper.award_counted_usd(a) for a in _lmt_all) / 100e9
-                                   / dod_scraper.DOD_FULL_SIGNAL_RATIO)) < 1e-9)
+      and abs(_sum["signal"] - dod_scraper._dod_signal_curve(
+          sum(dod_scraper.award_counted_usd(a) for a in _lmt_all) / 100e9)) < 1e-9)
 check("DoD bulk score sums too (not last-wins)",
       abs(dod_scraper.dod_bulk_score(_day, lambda t: {"market_cap": 100e9})["LMT"]["signal"] - _sum["signal"]) < 1e-9)
 
@@ -1360,42 +1360,52 @@ check("legacy / demo awards without effective value still score on face value",
 _stack = [dict(a, ticker="ZZ") for a in (_cd[1], _cd[2])]
 _stk = dod_scraper.dod_signal_for_ticker(_stack, "ZZ", 1e12)
 check("per-ticker signal stacks COUNTED values (firm + haircut ceiling) and reports the face gap",
-      abs(_stk["signal"] - (400e6 + 40e6) / 1e12 / dod_scraper.DOD_FULL_SIGNAL_RATIO) < 1e-12
+      abs(_stk["signal"] - dod_scraper._dod_signal_curve((400e6 + 40e6) / 1e12)) < 1e-12
       and "counted of $800M face" in _stk["detail"])
 # ---- signal scale + confidence weighting (enhanced_dod_award_signal spec)
-_R = dod_scraper.DOD_FULL_SIGNAL_RATIO
-_s1 = dod_scraper.dod_award_signal({"value_usd": 65e6, "contractor": "X"}, market_cap=65e9)
-check("signal saturates at 0.1% of market cap ($65M on $65B = full +1.0)", abs(_s1["signal"] - 1.0) < 1e-12)
-_s2 = dod_scraper.dod_award_signal({"value_usd": 32.5e6, "contractor": "X"}, market_cap=65e9)
-check("below saturation the signal scales linearly (half the size = half the signal)", abs(_s2["signal"] - 0.5) < 1e-12)
-check("a huge award can't push the signal past +1",
-      dod_scraper.dod_award_signal({"value_usd": 5e10, "contractor": "X"}, market_cap=1e10)["signal"] == 1.0)
+import math as _m
+_curve = lambda r: _m.log1p(r / 0.001) / _m.log1p(5.0)
+_sg = lambda value, mcap: dod_scraper.dod_award_signal({"value_usd": value, "contractor": "X"}, market_cap=mcap)["signal"]
+check("log curve: 0.1% of market cap -> ~0.39, 0.5% -> exactly 1.0 (not the 0.69 the spec's comment claims)",
+      abs(_sg(65e6, 65e9) - _curve(0.001)) < 1e-12 and abs(_sg(65e6, 65e9) - 0.3869) < 1e-3
+      and abs(_sg(325e6, 65e9) - 1.0) < 1e-12)
+check("log curve is monotone and concave: small awards register, bigger ones add less",
+      0 < _sg(6.5e6, 65e9) < _sg(32.5e6, 65e9) < _sg(65e6, 65e9) < _sg(195e6, 65e9) < 1.0
+      and _sg(32.5e6, 65e9) > 0.5 * _sg(65e6, 65e9))
+check("log curve: nothing above 0.5% of market cap adds anything ($1B on $65B = $10B on $65B = 1.0)",
+      _sg(1e9, 65e9) == _sg(10e9, 65e9) == 1.0)
+check("signal curve never raises on zero/negative ratios", dod_scraper._dod_signal_curve(0) == 0.0
+      and dod_scraper._dod_signal_curve(-0.002) == 0.0)
 _cw = dod_scraper.dod_award_signal({"value_usd": 200e6, "contractor": "X", "vehicle_weight": 0.25}, market_cap=1e10)
 _c1 = dod_scraper.dod_award_signal({"value_usd": 200e6, "contractor": "X"}, market_cap=1e10)
 check("confidence is NOT scaled by vehicle_weight (the ceiling discount is already in the counted value)",
       _cw["confidence"] == _c1["confidence"] == 1.0)
 check("confidence is min(1, counted / $100M)",
       abs(dod_scraper.dod_award_signal({"value_usd": 25e6, "contractor": "X"}, market_cap=1e10)["confidence"] - 0.25) < 1e-12)
-_tup = dod_scraper.enhanced_dod_award_signal(_cd[2], 1e12)
-check("enhanced_dod_award_signal -> (signal, confidence) tuple matching dod_award_signal",
+check("a huge award can't push the signal past +1",
+      dod_scraper.dod_award_signal({"value_usd": 5e10, "contractor": "X"}, market_cap=1e10)["signal"] == 1.0)
+_tup = dod_scraper.refined_dod_award_signal(_cd[2], 1e12)
+check("refined_dod_award_signal -> (signal, confidence) tuple matching dod_award_signal; old name still works",
+      dod_scraper.enhanced_dod_award_signal is dod_scraper.refined_dod_award_signal)
+check("refined_dod_award_signal -> (signal, confidence) tuple matching dod_award_signal",
       isinstance(_tup, tuple) and _tup == (dod_scraper.dod_award_signal(_cd[2], market_cap=1e12)["signal"],
                                            dod_scraper.dod_award_signal(_cd[2], market_cap=1e12)["confidence"]))
 check("enhanced_dod_award_signal: (0.0, 0.0) with no market cap or nothing counted",
-      dod_scraper.enhanced_dod_award_signal(_cd[2], 0) == (0.0, 0.0)
-      and dod_scraper.enhanced_dod_award_signal(_cd[2], None) == (0.0, 0.0)
-      and dod_scraper.enhanced_dod_award_signal(_cd[3], 1e12) == (0.0, 0.0))
+      dod_scraper.refined_dod_award_signal(_cd[2], 0) == (0.0, 0.0)
+      and dod_scraper.refined_dod_award_signal(_cd[2], None) == (0.0, 0.0)
+      and dod_scraper.refined_dod_award_signal(_cd[3], 1e12) == (0.0, 0.0))
 _bare = {"description": "Acme Inc., Dayton, Ohio, is awarded a $4,000,000,000 indefinite-delivery/indefinite-quantity contract.",
          "value_usd": 4e9}
-_bs, _bc = dod_scraper.enhanced_dod_award_signal(_bare, 1e12)
+_bs, _bc = dod_scraper.refined_dod_award_signal(_bare, 1e12)
 check("enhanced_dod_award_signal parses a bare description+headline record (ceiling haircut)",
-      abs(_bs - 4e9 * dod_scraper.CEILING_WEIGHT / 1e12 / _R) < 1e-12 and _bc == 1.0)
+      abs(_bs - dod_scraper._dod_signal_curve(4e9 * dod_scraper.CEILING_WEIGHT / 1e12)) < 1e-12 and _bc == 1.0)
 check("an explicit zero stays zero: it does not fall back to the headline value",
-      dod_scraper.enhanced_dod_award_signal({"value_usd": 400e6, "effective_value_usd": 0.0}, 1e12) == (0.0, 0.0)
+      dod_scraper.refined_dod_award_signal({"value_usd": 400e6, "effective_value_usd": 0.0}, 1e12) == (0.0, 0.0)
       and dod_scraper.dod_award_signal({"value_usd": 400e6, "effective_value_usd": 0.0}, market_cap=1e12) is None)
 check("stored breakdown is used as-is: an obligation past the 500-char description cut is not lost",
-      dod_scraper.enhanced_dod_award_signal(
+      dod_scraper.refined_dod_award_signal(
           dict(_bare, description=_bare["description"][:40], effective_value_usd=7e6, vehicle_weight=0.25), 1e12)[0]
-      == 7e6 / 1e12 / _R)
+      == dod_scraper._dod_signal_curve(7e6 / 1e12))
 check("scraped awards carry vehicle_weight as an informational field (ceiling 0.25, firm 1.0)",
       _cb["Beta"]["vehicle_weight"] == 0.25 and _cb["Gamma"]["vehicle_weight"] == 1.0)
 
