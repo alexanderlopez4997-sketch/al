@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import time
+from datetime import date
 
 CACHE_DIR = os.path.expanduser("~/.meridian_cache")
 CACHE_TTL = 24 * 3600          # fundamentals change quarterly; a day is plenty fresh
@@ -29,13 +30,13 @@ _MIN_INTERVAL = 0.85           # seconds between AV calls (premium 75/min ≈ 0.
 _last_call = [0.0]
 
 
-def _cache_path(ticker):
-    return os.path.join(CACHE_DIR, f"fund_{ticker.upper()}.json")
+def _cache_path(ticker, prefix="fund"):
+    return os.path.join(CACHE_DIR, f"{prefix}_{ticker.upper()}.json")
 
 
-def _read_cache(ticker):
+def _read_cache(ticker, prefix="fund"):
     try:
-        with open(_cache_path(ticker)) as f:
+        with open(_cache_path(ticker, prefix)) as f:
             obj = json.load(f)
         if time.time() - obj.get("_ts", 0) < CACHE_TTL:
             return obj.get("data")
@@ -44,10 +45,10 @@ def _read_cache(ticker):
     return None
 
 
-def _write_cache(ticker, data):
+def _write_cache(ticker, data, prefix="fund"):
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
-        with open(_cache_path(ticker), "w") as f:
+        with open(_cache_path(ticker, prefix), "w") as f:
             json.dump({"_ts": time.time(), "data": data}, f)
     except Exception:
         pass
@@ -232,3 +233,134 @@ def fmt_fund(fund):
     de = f"{fund['de']:.1f}" if fund.get("de") is not None else "—"
     g = f"{fund['growth']:+.0f}%" if fund.get("growth") is not None else "—"
     return f"P/E {pe} · D/E {de} · G {g}"
+
+
+# ============================================================ QUARTERLY EARNINGS (SEC XBRL) ===
+# Reads the latest 10-Q numbers straight from SEC's company-facts XBRL feed
+# (no API key, no third-party package). Fetching reuses edgar.py's rate-limited,
+# TTL-cached client; the parsing below is pure so it can be tested offline.
+COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+_REVENUE_CONCEPTS = ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
+                     "RevenueFromContractWithCustomerIncludingAssessedTax", "SalesRevenueNet")
+_NET_INCOME_CONCEPTS = ("NetIncomeLoss", "ProfitLoss")
+_OP_INCOME_CONCEPTS = ("OperatingIncomeLoss",)
+_QUARTER_DAYS = (70, 105)        # a single fiscal quarter; 10-Qs also carry 6/9-month YTD rows
+EARNINGS_CACHE_PREFIX = "q10"
+
+
+def _days(start, end):
+    return (date.fromisoformat(end) - date.fromisoformat(start)).days
+
+
+def _quarterly_series(facts, concepts):
+    """{period_end: (value, period_start)} for single-quarter 10-Q facts under the concept
+    with the most recent quarter. When a period was reported in several filings, the
+    latest filing wins (picks up restatements)."""
+    best = {}
+    gaap = (facts or {}).get("facts", {}).get("us-gaap", {})
+    for concept in concepts:
+        rows = gaap.get(concept, {}).get("units", {}).get("USD", [])
+        cur = {}
+        for r in rows:
+            try:
+                if not str(r.get("form", "")).startswith("10-Q") or r.get("val") is None:
+                    continue
+                if not _QUARTER_DAYS[0] <= _days(r["start"], r["end"]) <= _QUARTER_DAYS[1]:
+                    continue
+                if r["end"] not in cur or r.get("filed", "") >= cur[r["end"]][2]:
+                    cur[r["end"]] = (float(r["val"]), r["start"], r.get("filed", ""))
+            except (KeyError, ValueError, TypeError):
+                continue
+        # companies switch revenue tags over time: prefer the tag with the freshest quarter
+        if cur and (not best or max(cur) > max(best)):
+            best = cur
+    return {end: (v[0], v[1]) for end, v in best.items()}
+
+
+def _nearest(series, end, target_days, tol):
+    """Value of the quarter ending ~target_days before `end` (within ±tol days), else None."""
+    hits = [(abs(_days(e, end) - target_days), v[0]) for e, v in series.items()
+            if abs(_days(e, end) - target_days) <= tol]
+    return min(hits)[1] if hits else None
+
+
+def _pct_change(new, old):
+    """Relative change that stays meaningful across a negative base (loss -> smaller loss is +)."""
+    if new is None or old in (None, 0):
+        return None
+    return (new - old) / abs(old)
+
+
+def _clip(x, lim=1.0):
+    return max(-lim, min(lim, x))
+
+
+def earnings_from_facts(facts):
+    """Pure transform: SEC company-facts JSON -> quarterly-earnings dict. Returns
+    {"status": "no_data", "signal": 0.0, ...} when nothing usable."""
+    rev = _quarterly_series(facts, _REVENUE_CONCEPTS)
+    ni = _quarterly_series(facts, _NET_INCOME_CONCEPTS)
+    op = _quarterly_series(facts, _OP_INCOME_CONCEPTS)
+    ends = list(rev) or list(ni)
+    if not ends:
+        return {"status": "no_data", "signal": 0.0, "detail": "no 10-Q quarterly facts"}
+    anchor = max(ends)
+
+    def val(series):
+        return series[anchor][0] if anchor in series else None
+
+    revenue, net_income, op_income = val(rev), val(ni), val(op)
+    # The prior-year quarter is always the comparative in the same 10-Q (~364 days back);
+    # prior-quarter exists only for Q2/Q3 filings since Q4 lives in the 10-K, not a 10-Q.
+    prev_rev = _nearest(rev, anchor, 364, 20)
+    rev_yoy = _pct_change(revenue, prev_rev)
+    rev_qoq = _pct_change(revenue, _nearest(rev, anchor, 91, 20))
+    ni_yoy = _pct_change(net_income, _nearest(ni, anchor, 364, 20))
+    margin = op_income / revenue if op_income is not None and revenue else None
+    prev_op = _nearest(op, anchor, 364, 20)
+    prev_margin = prev_op / prev_rev if prev_op is not None and prev_rev else None
+    margin_chg = (margin - prev_margin) * 100 if margin is not None and prev_margin is not None else None
+
+    # Signal in [-1, 1]: revenue growth saturates at +/-30% YoY, net income at +/-50%,
+    # operating margin change at +/-5pp. Missing components are dropped, weights renormalised.
+    parts = [(0.4, rev_yoy / 0.30 if rev_yoy is not None else None),
+             (0.3, ni_yoy / 0.50 if ni_yoy is not None else None),
+             (0.3, margin_chg / 5.0 if margin_chg is not None else None)]
+    live = [(w, _clip(x)) for w, x in parts if x is not None]
+    signal = round(sum(w * x for w, x in live) / sum(w for w, _ in live), 3) if live else 0.0
+
+    def pct(x):
+        return f"{x * 100:+.1f}%" if x is not None else "n/a"
+    rev_s = f"${revenue:,.0f}" if revenue is not None else "n/a"
+    margin_s = f"{margin * 100:.1f}%" if margin is not None else "n/a"
+    chg_s = f" ({margin_chg:+.1f}pp YoY)" if margin_chg is not None else ""
+    detail = (f"Quarter ended {anchor}: revenue {rev_s} (YoY {pct(rev_yoy)}, QoQ {pct(rev_qoq)}); "
+              f"net income YoY {pct(ni_yoy)}; op margin {margin_s}{chg_s}")
+    return {"status": "success" if live else "no_data", "signal": signal, "period_end": anchor,
+            "revenue": revenue, "net_income": net_income, "operating_income": op_income,
+            "revenue_yoy": rev_yoy, "revenue_qoq": rev_qoq, "net_income_yoy": ni_yoy,
+            "operating_margin": margin, "margin_change_pp": margin_chg, "detail": detail}
+
+
+def analyze_quarterly_earnings(ticker: str, use_cache: bool = True) -> dict:
+    """Latest 10-Q performance from SEC XBRL company facts: revenue growth (YoY/QoQ),
+    net income shift and operating-margin trend, folded into a bounded `signal` in [-1, 1].
+    Fails soft (Meridian rule): always returns a dict with `status` and `signal`, never raises."""
+    try:
+        ticker = ticker.upper()
+        if use_cache:
+            cached = _read_cache(ticker, EARNINGS_CACHE_PREFIX)
+            if cached is not None:
+                return cached
+        import edgar                      # repo's SEC client (rate-limited + cached), not PyPI edgartools
+        cik = edgar._load_ciks().get(ticker)
+        if not cik:
+            return {"status": "no_data", "signal": 0.0, "detail": f"no SEC CIK for {ticker}"}
+        facts = json.loads(edgar._get(COMPANY_FACTS_URL.format(cik=cik), timeout=30))
+        out = earnings_from_facts(facts)
+        out["ticker"] = ticker
+        if use_cache and out["status"] == "success":
+            _write_cache(ticker, out, EARNINGS_CACHE_PREFIX)
+        return out
+    except Exception as e:
+        return {"status": "error", "signal": 0.0, "detail": str(e)}

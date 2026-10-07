@@ -273,6 +273,44 @@ check("_num coerces", fe._num("1.5") == 1.5 and fe._num("None") is None and fe._
 check("_pick first valid", fe._pick({"a": "None", "b": "3.2"}, "a", "b") == 3.2)
 check("fmt_fund formats", "P/E" in fe.fmt_fund(f))
 
+# --- quarterly earnings from SEC XBRL company facts (pure parsing, no network)
+def _q(start, end, val, form="10-Q", filed=None):
+    return {"start": start, "end": end, "val": val, "form": form, "filed": filed or end}
+_facts = {"facts": {"us-gaap": {
+    "Revenues": {"units": {"USD": [
+        _q("2024-04-01", "2024-06-30", 1000), _q("2024-01-01", "2024-06-30", 1900),   # YTD row ignored
+        _q("2024-07-01", "2024-09-30", 1050),
+        _q("2025-04-01", "2025-06-30", 1200), _q("2025-07-01", "2025-09-30", 1300),
+        _q("2025-07-01", "2025-09-30", 1310, filed="2025-11-20"),                      # restatement wins
+        _q("2025-01-01", "2025-12-31", 5000, form="10-K")]}},
+    "NetIncomeLoss": {"units": {"USD": [_q("2024-07-01", "2024-09-30", 100), _q("2025-07-01", "2025-09-30", 150)]}},
+    "OperatingIncomeLoss": {"units": {"USD": [_q("2024-07-01", "2024-09-30", 105), _q("2025-07-01", "2025-09-30", 170)]}},
+}}}
+_e = fe.earnings_from_facts(_facts)
+check("earnings: success status", _e["status"] == "success" and _e["period_end"] == "2025-09-30")
+check("earnings: restated revenue + YTD/10-K rows ignored", _e["revenue"] == 1310)
+check("earnings: revenue YoY", abs(_e["revenue_yoy"] - (1310 - 1050) / 1050) < 1e-9)
+check("earnings: revenue QoQ", abs(_e["revenue_qoq"] - (1310 - 1200) / 1200) < 1e-9)
+check("earnings: net income YoY", abs(_e["net_income_yoy"] - 0.5) < 1e-9)
+check("earnings: margin expansion in pp", _e["margin_change_pp"] > 0)
+check("earnings: signal bounded and positive", 0 < _e["signal"] <= 1)
+_loss = {"facts": {"us-gaap": {"NetIncomeLoss": {"units": {"USD": [
+    _q("2024-07-01", "2024-09-30", -100), _q("2025-07-01", "2025-09-30", -50)]}}}}}
+check("earnings: shrinking loss counts as improvement", fe.earnings_from_facts(_loss)["net_income_yoy"] > 0)
+for _bad in (None, {}, {"facts": {}}, {"facts": {"us-gaap": {"Revenues": {"units": {"USD": [{"form": "10-Q"}]}}}}}):
+    _r = fe.earnings_from_facts(_bad)
+    check("earnings: bad input fails soft", _r["status"] == "no_data" and _r["signal"] == 0.0)
+with unittest.mock.patch.object(edgar, "_load_ciks", return_value={}):
+    _r = fe.analyze_quarterly_earnings("ZZZZ", use_cache=False)
+    check("analyze_quarterly_earnings: unknown ticker -> no_data", _r["status"] == "no_data" and "signal" in _r)
+with unittest.mock.patch.object(edgar, "_load_ciks", side_effect=RuntimeError("boom")):
+    _r = fe.analyze_quarterly_earnings("AAPL", use_cache=False)
+    check("analyze_quarterly_earnings: exceptions fail soft", _r["status"] == "error" and _r["signal"] == 0.0)
+with unittest.mock.patch.object(edgar, "_load_ciks", return_value={"AAPL": "0000320193"}), \
+     unittest.mock.patch.object(edgar, "_get", return_value=__import__("json").dumps(_facts)):
+    _r = fe.analyze_quarterly_earnings("aapl", use_cache=False)
+    check("analyze_quarterly_earnings: end-to-end with mocked SEC", _r["status"] == "success" and _r["ticker"] == "AAPL")
+
 # ------------------------------------------------------------- sentiment ----
 section("sentiment_engine")
 s, hits = se.score_text("earnings beat, strong growth and record profit surge")
