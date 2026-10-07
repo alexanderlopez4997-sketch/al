@@ -1641,14 +1641,17 @@ class App:
         self.tab_analyze = tk.Frame(nb, bg=BG)
         self.tab_screen = tk.Frame(nb, bg=BG)
         self.tab_lead = tk.Frame(nb, bg=BG)
+        self.tab_dod = tk.Frame(nb, bg=BG)
         self.tab_model = tk.Frame(nb, bg=BG)
         nb.add(self.tab_analyze, text="Analyze")
         nb.add(self.tab_screen, text="Screener")
         nb.add(self.tab_lead, text="Leaderboard")
+        nb.add(self.tab_dod, text="DoD Awards")
         nb.add(self.tab_model, text="Model")
         self._build_analyze(self.tab_analyze)
         self._build_screener(self.tab_screen)
         self._build_leaderboard(self.tab_lead)
+        self._build_dod(self.tab_dod)
         self._build_model(self.tab_model)
         self.gui_queue = queue.Queue()
         try:
@@ -1706,6 +1709,110 @@ class App:
         except Exception:
             pass
         self.root.after(30000, self._update_feeds)
+
+    # ================= DOD AWARDS TAB =================
+    def _build_dod(self, tab):
+        row = tk.Frame(tab, bg=BG); row.pack(fill="x", pady=(6, 4))
+        self.d_demo = tk.BooleanVar(value=False)
+        self._check(row, "Demo (offline)", self.d_demo).pack(side="left")
+        self.d_btn = tk.Button(row, text="Load DoD Awards", command=self.run_dod,
+                               font=self.monob, bg=GOLD, fg="#191102",
+                               activebackground="#a8863e", relief="flat", padx=22, pady=4)
+        self.d_btn.pack(side="right")
+        self.d_status = tk.Label(tab, text="Today's defense.gov contract awards, scored by contractor "
+                                 "market cap, with 1-day news sentiment.",
+                                 bg=BG, fg=DIM, font=self.ui, anchor="w")
+        self.d_status.pack(fill="x")
+        self.d_out = self._out(tab); self.d_out.pack(fill="both", expand=True, pady=(6, 0))
+
+    def run_dod(self):
+        self.d_btn.configure(state="disabled")
+        self.d_status.configure(text="Fetching DoD contract awards…", fg=AMBER)
+        threading.Thread(target=self._work_dod, args=(self.d_demo.get(),), daemon=True).start()
+
+    def _work_dod(self, demo):
+        try:
+            if demo:
+                awards = [
+                    {"ticker": "RTX", "contractor": "Raytheon Technologies", "value_usd": 250_000_000,
+                     "date": "2026-10-06", "description": "Missile systems integration contract",
+                     "signal": 0.40, "confidence": 0.90, "sentiment": "bullish"},
+                    {"ticker": "LMT", "contractor": "Lockheed Martin", "value_usd": 180_000_000,
+                     "date": "2026-10-06", "description": "Satellite communications platform",
+                     "signal": 0.35, "confidence": 0.85, "sentiment": "bullish"},
+                    {"ticker": "NOC", "contractor": "Northrop Grumman", "value_usd": 120_000_000,
+                     "date": "2026-10-06", "description": "Defense systems engineering",
+                     "signal": 0.25, "confidence": 0.80, "sentiment": "neutral"},
+                ]
+            else:
+                fkey = qe.FINNHUB_DEFAULT_KEY
+                avk = os.environ.get("ALPHA_VANTAGE_KEY")
+                awards = dod_scraper.dod_daily_awards()
+
+                def sentiment(aw):
+                    aw["sentiment"] = "neutral"
+                    if not aw.get("ticker"):
+                        return
+                    try:
+                        sen = se.news_sentiment(aw["ticker"], fkey, avk, days=1)
+                        sg = (sen or {}).get("signal", 0)
+                        aw["sentiment"] = "bullish" if sg > 0.1 else "bearish" if sg < -0.1 else "neutral"
+                    except Exception:
+                        pass
+                with ThreadPoolExecutor(max_workers=6) as ex:
+                    list(ex.map(sentiment, awards))
+                dod_scraper.annotate_awards(
+                    awards, lambda t: contracts.market_cap_from_finnhub(t, fkey))
+            self._post(self._render_dod, awards, demo)
+        except Exception as e:
+            self._post(self._dod_failed, str(e))
+
+    def _dod_failed(self, msg):
+        self.d_status.configure(text=f"DoD Awards failed: {msg}", fg=SELL)
+        self.d_btn.configure(state="normal")
+
+    @staticmethod
+    def _usd_short(x):
+        a = abs(x or 0)
+        if a >= 1e9: return f"${a/1e9:.1f}B"
+        if a >= 1e6: return f"${a/1e6:.0f}M"
+        if a >= 1e3: return f"${a/1e3:.0f}K"
+        return f"${a:.0f}"
+
+    def _render_dod(self, awards, demo):
+        o = self.d_out
+        o.configure(state="normal"); o.delete("1.0", "end")
+        o.insert("end", "DoD CONTRACT INTELLIGENCE  ", "big")
+        o.insert("end", "(DEMO)\n" if demo else "(defense.gov)\n", "dim")
+        if not awards:
+            o.insert("end", "\nNo DoD contract awards announced today.\n", "dim")
+            o.configure(state="disabled")
+            self.d_status.configure(text="No awards today.", fg=DIM)
+            self.d_btn.configure(state="normal")
+            return
+        total = sum(a.get("value_usd", 0) for a in awards)
+        o.insert("end", f"{len(awards)} award{'s' if len(awards) != 1 else ''} · "
+                 f"{self._usd_short(total)} total value\n\n", "gold")
+        for aw in awards:
+            sent = aw.get("sentiment", "neutral")
+            stag = "buy" if sent == "bullish" else "sell" if sent == "bearish" else "warn"
+            o.insert("end", f"{aw.get('ticker') or '?':<7}", "big")
+            o.insert("end", f"{aw.get('contractor', 'Unknown')}  ", "txt")
+            o.insert("end", f"{sent.upper()}\n", stag)
+            o.insert("end", f"       {self._usd_short(aw.get('value_usd', 0))} · "
+                     f"{aw.get('description', 'Contract award')[:140]}\n", "dim")
+            if aw.get("signal") is not None:
+                o.insert("end", f"       {aw.get('date', 'today')} · signal {aw['signal']:+.2f} · "
+                         f"confidence {aw.get('confidence', 0):.0%}\n", "dim")
+            else:
+                o.insert("end", f"       {aw.get('date', 'today')} · no signal "
+                         "(unmapped ticker or no market cap)\n", "dim")
+            o.insert("end", "\n", "dim")
+        o.insert("end", "Awards are scored by value relative to the contractor's market cap; "
+                 "sentiment reflects 1-day news coverage. Research output, not a prediction.\n", "dim")
+        o.configure(state="disabled")
+        self.d_status.configure(text=f"{len(awards)} award(s) loaded.", fg=BUY)
+        self.d_btn.configure(state="normal")
 
     def _build_model(self, tab):
         out = self._out(tab)
@@ -1998,6 +2105,10 @@ class App:
             seg = build_report_segments(res, res.get("opt"), a["account"], a["risk"])
             if a.get("math"):
                 seg = seg + build_live_math_segments(res)
+            if dod_awards:
+                seg = seg + [("\nDOD AWARD (defense.gov)  ", "head"),
+                             (f"{dod_awards['detail']} · signal {dod_awards['signal']:+.2f} · "
+                              f"confidence {dod_awards['confidence']:.0%}\n", "txt")]
             self._post(self._render_single, seg, recs, congress, a["sym"], a["demo"])
         except Exception as e:
             self._post(self._error_single, str(e))
