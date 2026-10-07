@@ -63,6 +63,14 @@ def confirm(res):
         add("Alt-data tilt not negative", _ok(alt["adjustment"] >= 0), f"{alt['adjustment']:+.1f}")
     else:
         add("Alt-data tilt not negative", "na")
+    # 6b · DoD contract award today (defense.gov, scored vs. market cap). Only ever
+    # confirms: an award is a positive catalyst, never a sell signal, so there is no
+    # kill-switch. Awards under ~$10M (confidence < 0.1) are noise -> n/a, not a fail.
+    dod = res.get("dod_awards")
+    if dod and dod.get("confidence", 0) >= 0.1:
+        add("DoD contract award today", _ok(dod["signal"] > 0), dod.get("detail", ""))
+    else:
+        add("DoD contract award today", "na")
     # 7 · whale accumulation (distribution is a kill)
     w = res.get("whale_activity")
     if w:
