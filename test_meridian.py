@@ -1034,6 +1034,19 @@ _bulk = dod_scraper.dod_bulk_score(_dod_awards)
 check("DoD bulk scoring returns dict", isinstance(_bulk, dict))
 check("DoD bulk scoring includes tickers", all(k in ["LMT", "BA"] for k in _bulk.keys()))
 
+# Test per-ticker blend (used by the desktop Analyze tab)
+_tk_sig = dod_scraper.dod_ticker_signal(_dod_awards, "LMT", 1e9)
+check("DoD ticker signal returns a scored dict for a matching ticker",
+      _tk_sig is not None and -1 <= _tk_sig["signal"] <= 1)
+check("DoD ticker signal is None for a ticker with no award",
+      dod_scraper.dod_ticker_signal(_dod_awards, "ZZZZ", 1e9) is None)
+check("DoD ticker signal is None without market cap",
+      dod_scraper.dod_ticker_signal(_dod_awards, "LMT", None) is None)
+_two = [{"ticker": "LMT", "value_usd": 50e6, "contractor": "Lockheed", "date": "2026-10-06"},
+        {"ticker": "LMT", "value_usd": 100e6, "contractor": "Lockheed", "date": "2026-10-06"}]
+check("DoD ticker signal averages multiple awards",
+      dod_scraper.dod_ticker_signal(_two, "LMT", 1e9)["detail"] == "2 DoD awards")
+
 # Test cron scheduling
 _cron = dod_scraper.schedule_dod_scraper()
 check("DoD scheduler returns cron expression (5pm ET, weekdays)", "0 17" in _cron and "1-5" in _cron)

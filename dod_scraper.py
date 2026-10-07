@@ -333,6 +333,32 @@ def dod_award_signal(award, ticker=None, market_cap=None, ttm_revenue=None):
     }
 
 
+def dod_ticker_signal(awards, ticker, market_cap):
+    """Blend today's DoD awards for one ticker into a single alt-data signal.
+
+    Args:
+      awards: list from dod_daily_awards()
+      ticker: symbol to match against award["ticker"]
+      market_cap: market cap in USD (None/<=0 -> no signal)
+
+    Returns:
+      {signal, confidence, detail} or None if nothing scorable. Multiple awards
+      are averaged.
+    """
+    if not awards or not market_cap or market_cap <= 0:
+        return None
+    signals = [dod_award_signal(a, ticker=ticker, market_cap=market_cap)
+               for a in awards if a.get("ticker") == ticker]
+    signals = [s for s in signals if s is not None]
+    if not signals:
+        return None
+    if len(signals) == 1:
+        return signals[0]
+    return {"signal": sum(s["signal"] for s in signals) / len(signals),
+            "confidence": sum(s["confidence"] for s in signals) / len(signals),
+            "detail": f"{len(signals)} DoD awards"}
+
+
 def dod_bulk_score(awards, fundamentals_fn=None):
     """Score all DoD awards from today, grouped by ticker.
 
