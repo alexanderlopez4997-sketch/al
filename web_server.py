@@ -1349,7 +1349,7 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
 </style></head><body>
 <div class="top"><span class="diamond">◆</span><div><div class="brand">MERIDIAN</div>
-  <div class="sublabel">QUANTITATIVE&nbsp;&nbsp;TRADING&nbsp;&nbsp;TERMINAL</div></div>
+  <div class="sublabel">SYSTEM</div></div>
   <div class="spacer"></div><span class="pill" id="sess">—</span><span class="clock" id="clock">--:--:-- ET</span></div>
 <div class="feeds"><span class="lbl">DATA FEEDS</span>__FEEDS__<span class="stream" id="stream">● STREAMING</span></div>
 <div class="ctrl">
