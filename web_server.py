@@ -1340,8 +1340,14 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  #wl{width:340px;font-family:ui-monospace,monospace;font-size:12px}
  button{background:var(--buy);color:#04140c;font-weight:700;padding:8px 18px;cursor:pointer;border:none}
  button:hover{filter:brightness(1.1)}
- .tabs{display:flex;gap:4px}.tab{padding:8px 14px;background:transparent;color:var(--dim);border:none;border-radius:5px;cursor:pointer}
- .tab.active{background:var(--panel2);color:var(--gold)}.toggle{color:var(--dim);display:flex;align-items:center;gap:6px;cursor:pointer}
+ .shell{flex:1;display:flex;min-height:0}
+ .side{width:200px;flex:none;display:flex;flex-direction:column;gap:14px;padding:12px;background:var(--panel);border-right:1px solid var(--line);overflow-y:auto}
+ .content{flex:1;min-width:0;display:flex;flex-direction:column}
+ .tabs{display:flex;flex-direction:column;gap:2px}
+ .tab{padding:9px 12px;background:transparent;color:var(--dim);border:none;border-left:3px solid transparent;border-radius:5px;cursor:pointer;text-align:left;width:100%}
+ .tab:hover{color:var(--txt)}.tab.active{background:var(--panel2);color:var(--gold);border-left-color:var(--gold)}
+ .quick{display:flex;flex-direction:column;gap:8px;padding-top:12px;border-top:1px solid var(--line)}
+ .quick #tk{width:100%}.toggle{color:var(--dim);display:flex;align-items:center;gap:6px;cursor:pointer}
  .main{flex:1;overflow:auto;padding:18px}
  .hd{display:flex;align-items:baseline;gap:14px;margin-bottom:10px}.tk{font-size:30px;font-weight:800}
  .px{font-family:ui-monospace,monospace;font-size:18px}.badge{margin-left:auto;padding:6px 16px;border-radius:6px;font-weight:800;letter-spacing:1px}
@@ -1425,13 +1431,16 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  .ev-src a{color:var(--blue);text-decoration:none}.ev-src a:hover{text-decoration:underline}
  .ev-ts{color:var(--dim);white-space:nowrap;font-family:ui-monospace,monospace;font-size:11px}
  .ev-amt{font-weight:800}
- ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
+ *{scrollbar-width:none}::-webkit-scrollbar{display:none}   /* no scrollbars; wheel/touch/keys still scroll */
+ @media (max-width:760px){.shell{flex-direction:column}.side{width:auto;border-right:none;border-bottom:1px solid var(--line);overflow:visible}
+   .tabs{flex-direction:row;flex-wrap:wrap}.tab{width:auto}.quick{flex-direction:row;align-items:center;border-top:none;padding-top:0}.quick #tk{width:120px}}
 </style></head><body>
 <div class="top"><span class="diamond">◆</span><div><div class="brand">MERIDIAN</div>
   <div class="sublabel">SYSTEM</div></div>
   <div class="spacer"></div><span class="pill" id="sess">—</span><span class="clock" id="clock">--:--:-- ET</span></div>
 <div class="feeds"><span class="lbl">DATA FEEDS</span>__FEEDS__<span class="stream" id="stream">● STREAMING</span></div>
-<div class="ctrl">
+<div class="shell">
+<nav class="side">
   <div class="tabs">
     <button class="tab active" data-v="dash" onclick="view('dash')">Dashboard</button>
     <button class="tab" data-v="analyze" onclick="view('analyze')">Analyze</button>
@@ -1445,15 +1454,19 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
     <button class="tab" data-v="mb" onclick="view('mb')">Morning</button>
     <button class="tab" data-v="tr" onclick="view('tr')">Track Record</button>
   </div>
-  <span class="spacer"></span>
+  <div class="quick">
   <input id="tk" value="NVDA" onkeydown="if(event.key==='Enter'){view('analyze');go()}">
   <button onclick="view('analyze');go()">Analyze</button>
   <label class="toggle"><input type="checkbox" id="demo" style="width:auto"> Demo</label>
-</div>
+  </div>
+</nav>
+<div class="content">
 <div class="ctrl" id="wlrow"><span class="lbl">WATCHLIST</span>
   <input id="wl" value="NVDA,AMD,AAPL,MSFT,TSLA,SOFI,PLTR,AMZN">
   <button onclick="refresh()">Refresh</button><span class="muted" id="wlnote"></span></div>
 <div class="main" id="main"></div>
+</div>
+</div>
 <script>
 const $=id=>document.getElementById(id); let V='dash', chart=null, timer=null;
 function demo(){return $('demo').checked?1:0} function wl(){return encodeURIComponent($('wl').value)}
