@@ -24,6 +24,18 @@ def _ok(cond):
     return "pass" if cond else "fail"
 
 
+def _cluster_tag(cl):
+    """'CLUSTER (3 insiders, $1,200,000)' for a detected insider buying cluster
+    (edgar.detect_insider_clusters), else "". Never raises -- it only decorates
+    the insider check's detail, so a malformed result must not break confirm()."""
+    try:
+        if not cl or not cl.get("cluster_detected"):
+            return ""
+        return f"CLUSTER ({int(cl.get('unique_buyer_count') or 0)} insiders, ${float(cl.get('total_value') or 0.0):,.0f})"
+    except Exception:
+        return ""
+
+
 def confirm(res):
     """Return {headline, passed, checkable, checks:[(label,state,detail)], kills:[(label,detail)]}."""
     v = res.get("verdict", {}) or {}
@@ -100,9 +112,17 @@ def confirm(res):
 
     # 10 · insider Form-4 bias (parsed XML: open-market P/S only, role/decay-weighted,
     # 10b5-1 discounted) — a confident net-selling cluster is a kill, net buying confirms
+    # A coordinated buying cluster (res["insider_cluster"], live-only) is built from
+    # this same Form 4 data, so it is NOT a separate vote -- counting it would let one
+    # source inflate confluence. It only annotates this check, and never changes
+    # pass/fail or the kill-switch below (net selling still wins over a cluster).
     ib = res.get("insider_form4")
     if ib:
-        add("Insider Form-4 bias (EDGAR)", _ok(ib["signal"] > 0), ib.get("detail", ""))
+        detail = ib.get("detail", "")
+        tag = _cluster_tag(res.get("insider_cluster"))
+        if tag:
+            detail = f"{tag} · {detail}" if detail else tag
+        add("Insider Form-4 bias (EDGAR)", _ok(ib["signal"] > 0), detail)
         if ib["signal"] < -0.3 and ib["confidence"] >= 0.3:
             kills.append(("Insider Form-4 net selling", ib.get("detail", "")))
     else:
