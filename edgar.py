@@ -247,6 +247,28 @@ def _get(url, timeout=15):
     return _get_bytes(url, timeout).decode()
 
 
+def _raw_form4_url(url):
+    """EDGAR lists a Form 4's primaryDocument under an XSL-rendering folder
+    (.../xslF345X05/form4.xml), which serves an HTML view of the filing; the
+    machine-readable XML sits one level up at .../form4.xml. Strip that folder;
+    URLs without one pass through unchanged."""
+    return re.sub(r"/xsl[^/]+/([^/]+)$", r"/\1", url or "")
+
+
+def _get_form4_bytes(url, timeout=15):
+    """Fetch a Form 4's ownership XML. Tries the raw-XML location first (see
+    _raw_form4_url) and falls back to the URL exactly as EDGAR listed it, so this can
+    only ever find MORE than fetching the listed URL did, never less. Callers keep the
+    listed URL for display (it is the human-readable view); this is only for parsing."""
+    raw = _raw_form4_url(url)
+    if raw != url:
+        try:
+            return _get_bytes(raw, timeout)
+        except Exception:
+            logger.info("raw Form 4 XML unavailable (%s); falling back to %s", raw, url)
+    return _get_bytes(url, timeout)
+
+
 def _load_ciks():
     """Ticker -> zero-padded CIK, cached on disk for 30 days."""
     global _cik_map
@@ -345,7 +367,7 @@ def _parse_form4(url, timeout=15):
     not a conviction signal, only actual open-market P(urchase)/S(ale)
     transactions are counted."""
     try:
-        root = ET.fromstring(_get_bytes(url, timeout))
+        root = ET.fromstring(_get_form4_bytes(url, timeout))
     except Exception:
         return None
     owner_el = root.find("reportingOwner")
@@ -508,13 +530,6 @@ def filings_between(ticker, forms, start, end, timeout=15):
     return sorted(out, key=lambda f: (f["date"], f["accepted"]))
 
 
-def _raw_form4_url(url):
-    """EDGAR lists a Form 4's primaryDocument under an XSL-rendering folder
-    (.../xslF345X05/form4.xml), which serves an HTML view; the machine-readable XML
-    sits one level up at .../form4.xml. Strip that folder; other URLs pass through."""
-    return re.sub(r"/xsl[^/]+/([^/]+)$", r"/\1", url or "")
-
-
 def form4_transactions_between(ticker, start, end, max_filings=40, timeout=15):
     """Open-market Form 4 transactions filed in [start, end], oldest first, in the
     shape form4_insider_bias()["transactions"] uses (code, usd, owner, title,
@@ -526,7 +541,7 @@ def form4_transactions_between(ticker, start, end, max_filings=40, timeout=15):
         if not f["url"]:
             continue
         try:
-            txs = parse_form4_xml(_get(_raw_form4_url(f["url"]), timeout))
+            txs = parse_form4_xml(_get_form4_bytes(f["url"], timeout).decode())
         except Exception:
             continue
         for tx in txs:
@@ -909,7 +924,7 @@ def form4_insider_bias(ticker, lookback_hours=72, half_life_hours=36, timeout=15
     transactions = []
     for f in filings[:max_filings]:
         try:
-            xml_text = _get(f["url"], timeout)
+            xml_text = _get_form4_bytes(f["url"], timeout).decode()
         except Exception:
             continue
         txs = parse_form4_xml(xml_text)
