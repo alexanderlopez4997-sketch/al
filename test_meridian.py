@@ -1955,12 +1955,13 @@ with unittest.mock.patch.dict(edgar._cik_map, {"XYZ": "0000000001"}), unittest.m
           and not any("history" in u for u in _pages))
     check("filings_between unknown ticker -> []", edgar.filings_between("NOPE", {"4"}, "2020-01-01", "2020-12-31") == [])
 _fetched = []
-def _fake_get4(url, timeout=15):
+def _fake_get4_bytes(url, timeout=15):
     if "/submissions/" in url:
-        return _fake_get(url, timeout)
+        return _fake_get(url, timeout).encode()
     _fetched.append(url)
-    return _FORM4_XML
-with unittest.mock.patch.dict(edgar._cik_map, {"XYZ": "0000000001"}), unittest.mock.patch.object(edgar, "_get", side_effect=_fake_get4):
+    return _FORM4_XML.encode()
+with unittest.mock.patch.dict(edgar._cik_map, {"XYZ": "0000000001"}), \
+     unittest.mock.patch.object(edgar, "_get_bytes", side_effect=_fake_get4_bytes):
     _f4 = edgar.form4_transactions_between("XYZ", "2020-06-01", "2020-06-30")
     check("form4_transactions_between fetches the RAW xml and returns evaluate()-ready transactions",
           _fetched and "xslF345X05" not in _fetched[0] and _f4 and all(t["accepted"].startswith("2020-06-02") and "code" in t for t in _f4))
@@ -1970,6 +1971,74 @@ with unittest.mock.patch.dict(edgar._cik_map, {"XYZ": "0000000001"}), unittest.m
     check("historical EDGAR helpers fail open", edgar.filings_between("XYZ", {"4"}, "2020-01-01", "2020-12-31") == []
           and edgar.form4_transactions_between("XYZ", "2020-01-01", "2020-12-31") == []
           and edgar.shares_outstanding_asof("XYZ", "2020-06-01") is None)
+
+# ----------------------------------------------------- Form 4 XSL url fix ----
+section("Form 4 raw-XML fetch")
+import datetime as _dt3
+_nowz = (_dt3.datetime.now(_dt3.timezone.utc) - _dt3.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+_subs4 = json.dumps({"filings": {"recent": {
+    "form": ["4"], "filingDate": [_dt3.date.today().isoformat()], "acceptanceDateTime": [_nowz],
+    "accessionNumber": ["0001-20-2001"], "primaryDocument": ["xslF345X05/f4.xml"]}}}).encode()
+_HTML_VIEW = b"<html><body><table><tr><td>Rendered Form 4 view</td></table></body>"   # not well-formed XML
+
+def _fake_edgar(calls, xsl_serves="html", raw_serves="xml"):
+    """EDGAR as it really behaves: the listed .../xslF345X05/f4.xml is an HTML view; the
+    raw XML is one folder up. `xsl_serves`/`raw_serves` let tests break either location."""
+    def get_bytes(url, timeout=15):
+        calls.append(url)
+        if "/submissions/" in url:
+            return _subs4
+        kind = xsl_serves if "/xslF345X05/" in url else raw_serves
+        if kind == "xml":
+            return _FORM4_XML.encode()
+        if kind == "html":
+            return _HTML_VIEW
+        raise OSError("404")
+    return get_bytes
+
+_XSL_URL = "https://www.sec.gov/Archives/edgar/data/1/000120202001/xslF345X05/f4.xml"
+check("an HTML view parses to nothing (what the unfixed code was handed)",
+      edgar.parse_form4_xml(_HTML_VIEW.decode()) == []
+      and unittest.mock.patch.object(edgar, "_get_bytes", return_value=_HTML_VIEW).start() is not None
+      and edgar._parse_form4(_XSL_URL) is None)
+unittest.mock.patch.stopall()
+
+_c = []
+with unittest.mock.patch.object(edgar, "_get_bytes", side_effect=_fake_edgar(_c)):
+    _p4 = edgar._parse_form4(_XSL_URL)
+check("_parse_form4 fetches the raw XML, not the HTML view",
+      _p4 and _p4["owner"] == "Jane Doe" and _p4["buy_usd"] == 50000.0 and len(_c) == 1 and "xslF345X05" not in _c[0])
+
+_c = []
+with unittest.mock.patch.dict(edgar._cik_map, {"XYZ": "0000000001"}), \
+     unittest.mock.patch.object(edgar, "_get_bytes", side_effect=_fake_edgar(_c)):
+    _bias = edgar.form4_insider_bias("XYZ", lookback_hours=72)
+check("form4_insider_bias works end-to-end when EDGAR lists the XSL path",
+      _bias and _bias["n_buys"] == 1 and _bias["n_sells"] == 1 and _bias["buy_usd"] == 50000.0)
+check("...and only ever fetched the raw XML for the Form 4 itself",
+      [u for u in _c if "/submissions/" not in u] and all("xslF345X05" not in u for u in _c if "/submissions/" not in u))
+
+_c = []
+with unittest.mock.patch.dict(edgar._cik_map, {"XYZ": "0000000001"}), \
+     unittest.mock.patch.object(edgar, "_get_bytes", side_effect=_fake_edgar(_c)):
+    _rf = edgar.recent_filings("XYZ", days=3)
+check("recent_filings classifies the Form 4 from its XML but still links the human-readable view",
+      _rf and _rf[0]["form"] == "4" and _rf[0]["bias"] == 1 and _rf[0]["usd"] == 50000.0
+      and "xslF345X05" in _rf[0]["url"])
+
+_c = []
+with unittest.mock.patch.object(edgar, "_get_bytes", side_effect=_fake_edgar(_c, xsl_serves="xml", raw_serves="404")):
+    _fb4 = edgar._parse_form4(_XSL_URL)
+check("falls back to the listed URL when the raw one is missing (never worse than before)",
+      _fb4 and _fb4["owner"] == "Jane Doe" and len(_c) == 2 and "xslF345X05" not in _c[0] and "xslF345X05" in _c[1])
+
+_c = []
+with unittest.mock.patch.object(edgar, "_get_bytes", side_effect=_fake_edgar(_c, raw_serves="xml")):
+    edgar._parse_form4("https://www.sec.gov/Archives/edgar/data/1/000120202001/f4.xml")
+check("a URL with no XSL folder is fetched once, unchanged", len(_c) == 1 and _c[0].endswith("/000120202001/f4.xml"))
+
+with unittest.mock.patch.object(edgar, "_get_bytes", side_effect=_fake_edgar([], xsl_serves="404", raw_serves="404")):
+    check("both locations failing still degrades to None, never raises", edgar._parse_form4(_XSL_URL) is None)
 
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")
