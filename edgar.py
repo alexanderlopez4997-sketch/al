@@ -427,6 +427,34 @@ def primary_filings(ticker, timeout=15):
     return out
 
 
+def dilutive_filings(ticker, days=10, timeout=15):
+    """Shelf registrations / offering prospectuses (DILUTIVE_FORMS) filed by `ticker`
+    in the last `days`, newest first: [{form, date, url}]. Reads only the
+    submissions index (the same cached URL recent_filings() uses), so unlike
+    recent_filings() it never fetches or parses a Form 4. [] on any failure."""
+    cik = _load_ciks().get(ticker.upper())
+    if not cik:
+        return []
+    try:
+        d = json.loads(_get(f"https://data.sec.gov/submissions/CIK{cik}.json", timeout))
+    except Exception:
+        return []
+    rec = d.get("filings", {}).get("recent", {})
+    forms = rec.get("form", []); dates = rec.get("filingDate", [])
+    acc = rec.get("accessionNumber", []); docs = rec.get("primaryDocument", [])
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    out = []
+    for i in range(len(forms)):
+        if forms[i] not in DILUTIVE_FORMS or i >= len(dates) or dates[i] < cutoff:
+            continue
+        a = acc[i].replace("-", "") if i < len(acc) else ""
+        doc = docs[i] if i < len(docs) else ""
+        url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{a}/{doc}"
+               if a and doc else f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}")
+        out.append({"form": forms[i], "date": dates[i], "url": url})
+    return sorted(out, key=lambda f: f["date"], reverse=True)
+
+
 def recent_filings(ticker, days=4, timeout=15):
     """Material SEC filings for `ticker` in the last `days`, newest first. Each:
     {form, note, bias, date, accepted, after_hours, url}, plus for 8-K filings:

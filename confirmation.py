@@ -83,6 +83,21 @@ def confirm(res):
         add("DoD contract award today", _ok(dod["signal"] > 0), dod.get("detail", ""))
     else:
         add("DoD contract award today", "na")
+    # 6c · contract award vs. the company's own EDGAR filings (contract_crosscheck): an
+    # offering filed right after the win, or unplanned insider selling into it, undercuts
+    # the award. Only ever a fail/na, never a pass: insider BUYING around an award is
+    # Form 4 data already voted on in check 10, so it only boosts the award's confidence
+    # in the alt-data tilt and is not counted a second time here.
+    cc_all = res.get("contract_crosscheck")
+    cc_bad = [(src, r) for src, r in (cc_all.items() if isinstance(cc_all, dict) else [])
+              if isinstance(r, dict) and r.get("negative")]
+    if cc_bad:
+        add("Contract award not undercut (EDGAR)", "fail", " | ".join(r.get("detail", "") for _, r in cc_bad))
+        dil = next((r for _, r in cc_bad if r.get("dilution")), None)
+        if dil:
+            kills.append(("Offering filed after contract award", dil["detail"]))
+    else:
+        add("Contract award not undercut (EDGAR)", "na")
     # 7 · whale accumulation (distribution is a kill)
     w = res.get("whale_activity")
     if w:
@@ -144,7 +159,9 @@ def confirm(res):
         kills.append(("RISKY (extreme volatility)", "signal reliability degraded"))
     for f in (res.get("filings") or []):
         if f.get("form") in edgar.DILUTIVE_FORMS and f.get("bias", 0) < 0:
-            kills.append(("Dilution / offering filed", f"{f['form']} — {f['note']}"))
+            # the award-linked kill above already names this offering; don't double-count it
+            if not any(l == "Offering filed after contract award" for l, _ in kills):
+                kills.append(("Dilution / offering filed", f"{f['form']} — {f['note']}"))
             break
     for f in (res.get("filings") or []):
         if f.get("form") == "4" and f.get("bias", 0) < 0 and "flood" in f.get("note", ""):

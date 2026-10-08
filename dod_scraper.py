@@ -867,7 +867,8 @@ def dod_award_signal(award, ticker=None, market_cap=None, ttm_revenue=None):
     else:
         detail = (f"${counted/1e6:.0f}M DoD award to {award.get('contractor', '?')} "
                   f"· {award.get('date', '?')}")
-    return {"signal": signal, "confidence": float(confidence), "detail": detail}
+    return {"signal": signal, "confidence": float(confidence), "detail": detail,
+            "award_date": award.get("date") or None}
 
 
 def refined_dod_award_signal(award_record, market_cap):

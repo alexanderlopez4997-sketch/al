@@ -8,6 +8,7 @@ Network-dependent functions (API fetches) are NOT called — only the pure
 transforms, scoring, and formatting they feed into. Exit code is nonzero on
 any failure so this can gate a launch.
 """
+import json
 import logging
 import os
 import sys
@@ -37,6 +38,7 @@ import tui_dashboard as td
 import signal_scoring as ss
 import quant_gui as qg
 import web_server as ws
+import contract_crosscheck as cc
 import contracts
 import dod_scraper
 
@@ -1583,6 +1585,134 @@ check("alt_data_tilt accepts gov_contracts parameter", _alt_with_contracts is no
 if _alt_with_contracts:
     check("GovContracts is in alt_data_tilt parts", "GovContracts" in _alt_with_contracts["parts"])
     check("GovContracts has ALT_WEIGHTS entry", "GovContracts" in qe.ALT_WEIGHTS)
+
+# ------------------------------------------------- contract <-> EDGAR cross-check -
+section("contract/EDGAR cross-check")
+import datetime as _dt
+_T = _dt.date(2026, 10, 8)
+_sig0 = {"signal": 0.4, "confidence": 0.8, "detail": "$50M award", "award_date": "2026-10-06"}
+_off = [{"form": "424B5", "date": "2026-10-07", "url": "u"}]
+_sell = [{"code": "S", "usd": 400_000.0, "owner": "CFO", "accepted": "2026-10-07T21:00:00.000Z", "is_10b5_1": False}]
+_buy = [{"code": "P", "usd": 300_000.0, "owner": "CEO", "accepted": "2026-09-20T14:00:00.000Z", "is_10b5_1": False}]
+
+check("contract_signal / dod_award_signal carry award_date",
+      contracts.contract_signal(contracts.summarize_contracts(
+          [{"contractValue": 5e7, "agency": "DoD", "date": "2026-10-06", "description": "x"}]),
+          market_cap=1e9)["award_date"] == "2026-10-06"
+      and dod_scraper.dod_award_signal({"value_usd": 5e7, "date": "2026-10-06", "contractor": "X",
+                                        "ticker": "X"}, market_cap=1e9)["award_date"] == "2026-10-06")
+
+_clean = cc.evaluate(_sig0, [], [], _T)
+check("no filings -> no flags, multiplier 1, not negative",
+      _clean and _clean["flags"] == [] and _clean["confidence_mult"] == 1.0 and not _clean["negative"])
+_d = cc.evaluate(_sig0, _off, [], _T)
+check("offering after award is negative and halves confidence",
+      _d["negative"] and _d["confidence_mult"] == cc.DILUTION_MULT and "424B5" in _d["detail"])
+check("offering BEFORE the award is ignored",
+      not cc.evaluate(_sig0, [{"form": "S-3", "date": "2026-10-05"}], [], _T)["flags"])
+check("offering same day as award counts",
+      cc.evaluate(_sig0, [{"form": "S-3", "date": "2026-10-06"}], [], _T)["negative"])
+check("offering outside DILUTION_WINDOW_DAYS is ignored",
+      not cc.evaluate(dict(_sig0, award_date="2026-09-01"),
+                      [{"form": "S-3", "date": "2026-09-20"}], [], _dt.date(2026, 9, 25))["flags"])
+check("post-award insider sale is negative", cc.evaluate(_sig0, [], _sell, _T)["negative"])
+check("10b5-1 sale is ignored", not cc.evaluate(_sig0, [], [dict(_sell[0], is_10b5_1=True)], _T)["flags"])
+check("sub-$100k sale is noise", not cc.evaluate(_sig0, [], [dict(_sell[0], usd=50_000.0)], _T)["flags"])
+check("sale BEFORE the award is not a post-award warning",
+      not cc.evaluate(_sig0, [], [dict(_sell[0], accepted="2026-10-01T10:00:00.000Z")], _T)["flags"])
+_b = cc.evaluate(_sig0, [], _buy, _T)
+check("pre-award insider buy boosts confidence and is not negative",
+      not _b["negative"] and _b["confidence_mult"] == cc.INSIDER_BUY_MULT)
+check("insider buy older than INSIDER_PRE_DAYS is ignored",
+      not cc.evaluate(_sig0, [], [dict(_buy[0], accepted="2026-08-01T10:00:00.000Z")], _T)["flags"])
+check("negative flag beats a positive one (no boost when dilution present)",
+      cc.evaluate(_sig0, _off, _buy, _T)["confidence_mult"] == cc.DILUTION_MULT)
+check("dilution + insider selling compound",
+      abs(cc.evaluate(_sig0, _off, _sell, _T)["confidence_mult"] - cc.DILUTION_MULT * cc.INSIDER_SELL_MULT) < 1e-9)
+check("non-positive signal, missing/future/stale award_date -> None",
+      all(cc.evaluate(x, _off, _sell, _T) is None for x in
+          (dict(_sig0, signal=0.0), dict(_sig0, signal=-0.2), {k: v for k, v in _sig0.items() if k != "award_date"},
+           dict(_sig0, award_date="not-a-date"), dict(_sig0, award_date="2026-12-01"),
+           dict(_sig0, award_date="2026-06-01"), None)))
+check("evaluate never raises on malformed EDGAR input",
+      cc.evaluate(_sig0, [None, {"date": None}, "junk"], [None, {"code": "S", "usd": "x", "accepted": 5}], _T) is not None)
+
+_adj = cc.adjusted_signal(_sig0, _d)
+check("adjusted_signal scales confidence, appends detail, keeps signal, doesn't mutate input",
+      abs(_adj["confidence"] - 0.4) < 1e-9 and _adj["signal"] == 0.4 and "EDGAR:" in _adj["detail"]
+      and _sig0["confidence"] == 0.8 and "crosscheck" not in _sig0)
+check("adjusted_signal caps boosted confidence at 1.0",
+      cc.adjusted_signal(dict(_sig0, confidence=0.95), _b)["confidence"] == 1.0)
+check("adjusted_signal passes through untouched with no result / no flags",
+      cc.adjusted_signal(_sig0, None) is _sig0 and cc.adjusted_signal(_sig0, _clean) is _sig0
+      and cc.adjusted_signal(None, _d) is None)
+
+with unittest.mock.patch.object(edgar, "dilutive_filings", return_value=_off) as _mf, \
+     unittest.mock.patch.object(edgar, "form4_insider_bias", return_value={"transactions": _sell}):
+    _g = cc.crosscheck_for_ticker("XYZ", _sig0, _T)
+    check("crosscheck_for_ticker combines both EDGAR sources",
+          _g and _g["dilution"] and _g["insider_sell_usd"] == 400_000.0)
+    cc.crosscheck_for_ticker("XYZ", dict(_sig0, signal=-0.1), _T)
+    cc.crosscheck_for_ticker("XYZ", dict(_sig0, award_date="2026-01-01"), _T)
+    check("crosscheck_for_ticker doesn't touch EDGAR for non-positive or stale awards", _mf.call_count == 1)
+with unittest.mock.patch.object(edgar, "dilutive_filings", side_effect=RuntimeError("down")):
+    check("crosscheck_for_ticker fails open when EDGAR errors", cc.crosscheck_for_ticker("XYZ", _sig0, _T) is None)
+with unittest.mock.patch.object(edgar, "dilutive_filings", return_value=[]), \
+     unittest.mock.patch.object(edgar, "form4_insider_bias", return_value=None):
+    check("crosscheck_for_ticker: quiet EDGAR -> clean result, not None",
+          cc.crosscheck_for_ticker("XYZ", _sig0, _T)["flags"] == [])
+
+with unittest.mock.patch.object(edgar, "dilutive_filings", return_value=_off), \
+     unittest.mock.patch.object(edgar, "form4_insider_bias", return_value=None):
+    _adjd, _res = cc.apply_crosschecks("XYZ", {"GovContracts": _sig0, "DoDAwards": None}, _T)
+check("apply_crosschecks adjusts per source and reports only sources with results",
+      _adjd["GovContracts"]["confidence"] < _sig0["confidence"] and _adjd["DoDAwards"] is None
+      and list(_res) == ["GovContracts"])
+
+# edgar.dilutive_filings: filters the cached submissions index, no Form 4 parsing
+_sub = json.dumps({"filings": {"recent": {
+    "form": ["424B5", "4", "S-3", "10-Q", "424B3"],
+    "filingDate": [(_dt.date.today() - _dt.timedelta(days=2)).isoformat(),
+                   (_dt.date.today() - _dt.timedelta(days=1)).isoformat(),
+                   (_dt.date.today() - _dt.timedelta(days=5)).isoformat(),
+                   (_dt.date.today() - _dt.timedelta(days=1)).isoformat(),
+                   (_dt.date.today() - _dt.timedelta(days=40)).isoformat()],
+    "accessionNumber": ["0001-26-1", "0001-26-2", "0001-26-3", "0001-26-4", "0001-26-5"],
+    "primaryDocument": ["a.htm", "b.xml", "c.htm", "d.htm", "e.htm"]}}})
+with unittest.mock.patch.dict(edgar._cik_map, {"XYZ": "0000000001"}), \
+     unittest.mock.patch.object(edgar, "_get", return_value=_sub), \
+     unittest.mock.patch.object(edgar, "_parse_form4", side_effect=AssertionError("must not parse Form 4")):
+    _df = edgar.dilutive_filings("XYZ", days=10)
+    check("dilutive_filings returns only in-window offering forms, newest first",
+          [f["form"] for f in _df] == ["424B5", "S-3"] and _df[0]["url"].endswith("/a.htm"))
+    check("dilutive_filings: unknown ticker / fetch error -> []",
+          edgar.dilutive_filings("NOPE", days=10) == [])
+with unittest.mock.patch.dict(edgar._cik_map, {"XYZ": "0000000001"}), \
+     unittest.mock.patch.object(edgar, "_get", side_effect=OSError("down")):
+    check("dilutive_filings fails open on network error", edgar.dilutive_filings("XYZ") == [])
+
+# confirmation: the award check can only fail/na, offering is a kill, buying is not a vote
+_ccv = dict(verified); _ccv["filings"] = []
+_cc_label = "Contract award not undercut (EDGAR)"
+_ccrow = lambda r: next(x for x in r["checks"] if x[0] == _cc_label)
+_base_cc = cf.confirm(_ccv)
+check("confirm: cross-check is na with no data", _ccrow(_base_cc)[1] == "na" and not _base_cc["kills"])
+_cc_dil = cf.confirm(dict(_ccv, contract_crosscheck={"DoDAwards": _d}))
+check("confirm: offering after award fails the check and kills",
+      _ccrow(_cc_dil)[1] == "fail" and any(l == "Offering filed after contract award" for l, _ in _cc_dil["kills"])
+      and "NOT VERIFIED" in _cc_dil["headline"])
+_cc_dup = cf.confirm(dict(_ccv, contract_crosscheck={"DoDAwards": _d},
+                          filings=[{"form": "424B5", "note": "dilution", "bias": -1}]))
+check("confirm: the same offering isn't double-counted as two kills",
+      len([1 for l, _ in _cc_dup["kills"] if "ffering" in l or "ilution" in l]) == 1)
+_cc_sell = cf.confirm(dict(_ccv, contract_crosscheck={"GovContracts": cc.evaluate(_sig0, [], _sell, _T)}))
+check("confirm: insider selling after award fails the check but is not a kill",
+      _ccrow(_cc_sell)[1] == "fail" and not _cc_sell["kills"])
+_cc_buy = cf.confirm(dict(_ccv, contract_crosscheck={"DoDAwards": _b}))
+check("confirm: insider buying around an award is not an extra vote",
+      _ccrow(_cc_buy)[1] == "na" and (_cc_buy["passed"], _cc_buy["checkable"]) == (_base_cc["passed"], _base_cc["checkable"]))
+check("confirm: malformed cross-check input never raises",
+      all(_ccrow(cf.confirm(dict(_ccv, contract_crosscheck=x)))[1] == "na" for x in (None, {}, "junk", {"a": None}, {"a": "x"})))
 
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")

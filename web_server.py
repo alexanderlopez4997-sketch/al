@@ -51,6 +51,7 @@ import trackrecord as tr
 import websocket_client_v2 as wsc
 import aapl_dashboard as ad
 import confirmation as cf
+import contract_crosscheck
 import contracts
 import dod_scraper
 
@@ -253,6 +254,14 @@ def _full_analyze(sym, demo, optimize=False):
             mcap = contracts.market_cap_from_finnhub(sym, fkey)
             return dod_scraper.dod_signal_for_ticker(awards, sym, mcap)
         dod_awards = _try(_fetch_dod_awards)
+        # Line the awards up against the company's own EDGAR filings (offering after a
+        # win, insider selling/buying around it) before they are blended or confirmed.
+        adj, res["contract_crosscheck"] = _try(
+            lambda: contract_crosscheck.apply_crosschecks(
+                sym, {"GovContracts": gov_contracts, "DoDAwards": dod_awards}),
+            ({}, {}))
+        gov_contracts = adj.get("GovContracts", gov_contracts)
+        dod_awards = adj.get("DoDAwards", dod_awards)
         res["dod_awards"] = dod_awards              # read by confirmation.confirm()
         if akey and asec:
             w0, w1 = of.after_hours_window()
