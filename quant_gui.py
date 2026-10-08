@@ -2106,6 +2106,8 @@ class App:
                 res["orderflow"] = out.get("orderflow")
                 res["filings"] = out.get("filings")
                 res["insider_form4"] = out.get("insider_form4")
+                # same Form 4 fetch, no extra SEC call; live branch only, read by confirmation.confirm()
+                res["insider_cluster"] = edgar.insider_cluster_for_ticker(sym, bias=res["insider_form4"])
             res["sentiment"] = sentiment
             try:
                 macro = se.macro_signal(sentiment)

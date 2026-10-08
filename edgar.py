@@ -934,17 +934,23 @@ def form4_records_from_bias(bias) -> list:
     return records
 
 
-def insider_cluster_for_ticker(ticker, bias=None, window_hours: int = 72) -> dict:
+_UNSET = object()
+
+
+def insider_cluster_for_ticker(ticker, bias=_UNSET, window_hours: int = 72) -> dict:
     """LIVE-ONLY cluster check for one ticker, for display (e.g. the dashboard
     badge). Reuses `bias` (a form4_insider_bias() result the caller already has)
-    to avoid a second SEC round-trip; fetches it itself when omitted. Never
+    to avoid a second SEC round-trip; fetches it itself only when omitted. An
+    explicit `bias=None` means "the caller already fetched and found no
+    qualifying activity" (form4_insider_bias returns None for that) and is NOT
+    refetched. Never
     raises -- any failure returns the same "no cluster" shape
     detect_insider_clusters() uses for an empty window. Reads only live Form 4
     data and is not called from any backtest path."""
     no_cluster = {"cluster_detected": False, "score": 0.0, "confidence": 0.0,
                   "details": "Insider cluster data unavailable."}
     try:
-        if bias is None:
+        if bias is _UNSET:
             bias = form4_insider_bias(ticker, lookback_hours=window_hours)
         return detect_insider_clusters(form4_records_from_bias(bias), window_hours=window_hours)
     except Exception:

@@ -414,6 +414,24 @@ no_bias = dict(verified); no_bias.pop("insider_form4", None)
 check("confirm marks Insider Form-4 na when unavailable",
       any(l == "Insider Form-4 bias (EDGAR)" and s == "na" for l, s, _ in cf.confirm(no_bias)["checks"]))
 
+# insider cluster: annotates the existing Form-4 check, never a second vote or a kill
+_cl_ok = {"cluster_detected": True, "unique_buyer_count": 3, "total_value": 1_200_000.0}
+_ins = lambda r: next(x for x in r["checks"] if x[0] == "Insider Form-4 bias (EDGAR)")
+cs_cl = cf.confirm(dict(buy_bias, insider_cluster=_cl_ok))
+check("confirm annotates the insider check with a detected cluster",
+      "CLUSTER (3 insiders, $1,200,000)" in _ins(cs_cl)[2] and _ins(cs_cl)[1] == "pass")
+check("confirm: a cluster is not an extra vote (passed/checkable/level unchanged)",
+      (cs_cl["passed"], cs_cl["checkable"], cs_cl["level"]) == (cs_buy["passed"], cs_buy["checkable"], cs_buy["level"])
+      and len(cs_cl["checks"]) == len(cs_buy["checks"]))
+cs_cl_sell = cf.confirm(dict(sell_bias, insider_cluster=_cl_ok))
+check("confirm: a cluster never overrides insider net-selling (still fails + kills)",
+      _ins(cs_cl_sell)[1] == "fail" and any("Insider Form-4 net selling" in l for l, _ in cs_cl_sell["kills"]))
+check("confirm: cluster without Form-4 data stays na (not a standalone vote)",
+      _ins(cf.confirm(dict(no_bias, insider_cluster=_cl_ok)))[1] == "na")
+check("confirm: no/negative/malformed cluster leaves the detail untouched and never raises",
+      all(_ins(cf.confirm(dict(buy_bias, insider_cluster=x)))[2] == "CEO bought"
+          for x in (None, {"cluster_detected": False}, "junk", {"cluster_detected": True, "unique_buyer_count": "x"})))
+
 # high-impact 8-K: informational check, never a kill on its own (earnings drift is a documented edge)
 hi8k = dict(verified); hi8k["filings"] = [{"form": "8-K", "note": "material event (8-K)", "bias": 0,
                                            "items": ["5.02"], "impact": "high"}]
@@ -739,6 +757,11 @@ check("form4_records_from_bias: drops 10b5-1 and unparseable rows", len(_recs) =
 check("form4_records_from_bias: None/garbage input -> []",
       edgar.form4_records_from_bias(None) == [] and edgar.form4_records_from_bias({"transactions": None}) == [])
 _cl = edgar.insider_cluster_for_ticker("TEST", bias=_bias)
+with unittest.mock.patch.object(edgar, "form4_insider_bias", return_value=None) as _fb:
+    edgar.insider_cluster_for_ticker("TEST", bias=None)
+    check("insider_cluster_for_ticker: explicit bias=None is NOT refetched", _fb.call_count == 0)
+    edgar.insider_cluster_for_ticker("TEST")
+    check("insider_cluster_for_ticker: omitted bias is fetched once", _fb.call_count == 1)
 check("insider_cluster_for_ticker: end-to-end cluster from bias (no network)",
       _cl["cluster_detected"] is True and _cl["unique_buyer_count"] == 2)
 with unittest.mock.patch.object(edgar, "form4_insider_bias", side_effect=RuntimeError("boom")):
