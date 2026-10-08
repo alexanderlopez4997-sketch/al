@@ -38,10 +38,14 @@ python3 quant_engine.py --positions                  # Show all
 ## Web Terminal (browser dashboard)
 
 ```bash
-python3 web_server.py
+./meridian.sh          # macOS / Linux  (Windows: double-click meridian.bat)
 ```
 
-Opens `http://127.0.0.1:8788` on this machine only (set `MERIDIAN_WEB_PORT` to
+The launcher creates `.venv` and installs `requirements.txt` on first run, then
+starts the server and opens your browser. Or run it directly with
+`python3 web_server.py`.
+
+It serves `http://127.0.0.1:8788` on this machine only (set `MERIDIAN_WEB_PORT` to
 override). To also open it on your phone (same Wi-Fi network), start it with:
 
 ```bash
