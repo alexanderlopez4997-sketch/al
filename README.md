@@ -52,6 +52,16 @@ The server prints the link to open on your phone. The dashboard has **no
 login**, so only do this on a network you trust — see `deploy/DEPLOY.md` for
 deploying it behind auth on a VPS.
 
+### Install as an app
+
+The dashboard is an installable web app (manifest + service worker). With
+`web_server.py` running, open it in Chrome or Edge and click the install icon in
+the address bar (or menu → *Install Meridian Terminal*); it then opens in its own
+window with its own icon. On iOS, use Safari → Share → *Add to Home Screen*. Browsers
+only offer install on `localhost` or HTTPS, so a phone reaching it over plain
+`http://<lan-ip>` can add a shortcut but not a full install. The app still needs
+`web_server.py` running; it only caches the install assets, never market data.
+
 ## Email Alerts (Gmail)
 
 Send `--alerts` or `--morning` reports to your inbox instead of (or in addition

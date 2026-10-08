@@ -1012,6 +1012,51 @@ def _diagnostics_json(tickers):
 
 
 # ---------------------------------------------------------------- routing ---
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+_MANIFEST = {
+    "name": "Meridian Terminal", "short_name": "Meridian",
+    "description": "Quant engine dashboard: watchlist, analysis, screener and signals.",
+    "start_url": "/", "scope": "/", "display": "standalone",
+    "background_color": "#0A0E15", "theme_color": "#0A0E15",
+    "icons": [
+        {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png"},
+        {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png"},
+        {"src": "/static/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+    ],
+}
+
+# Network-only: every /api response is live market data and must never be served from a
+# cache. The worker exists to make the app installable, and shows a short notice if the
+# server is unreachable instead of the browser's error page.
+_SERVICE_WORKER = """const OFFLINE = '<!DOCTYPE html><meta name="viewport" content="width=device-width,initial-scale=1">' +
+  '<body style="background:#0A0E15;color:#C9D6E2;font:16px system-ui;display:grid;place-items:center;height:100vh;margin:0">' +
+  '<p>Meridian cannot reach its server. Start web_server.py and reload.</p>';
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+self.addEventListener('fetch', e => {
+  if (e.request.mode !== 'navigate') return;
+  e.respondWith(fetch(e.request).catch(() =>
+    new Response(OFFLINE, {headers: {'Content-Type': 'text/html; charset=utf-8'}})));
+});
+"""
+
+
+def _static_file(name):
+    def read():
+        with open(os.path.join(_STATIC_DIR, name), "rb") as f:
+            return "image/png", f.read()
+    return read
+
+
+_PWA_ASSETS = {
+    "/manifest.webmanifest": lambda: ("application/manifest+json", json.dumps(_MANIFEST)),
+    "/sw.js": lambda: ("application/javascript", _SERVICE_WORKER),
+    **{f"/static/{n}": _static_file(n) for n in
+       ("icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png")},
+}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -1058,6 +1103,11 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return hmac.compare_digest(user, AUTH_USER) and hmac.compare_digest(pwd, AUTH_PASSWORD)
 
+    def _send_pwa_asset(self, path):
+        ctype, body = _PWA_ASSETS[path]()
+        # no-cache so a changed manifest / worker is picked up on the next load
+        return self._send(body, ctype, extra_headers={"Cache-Control": "no-cache"})
+
     def _send_auth_challenge(self):
         body = b"Authentication required"
         self.send_response(401)
@@ -1074,6 +1124,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        # Install assets are public and secret-free: the browser fetches the manifest
+        # and service worker without the Basic Auth header, so gating them would break
+        # "Install app".
+        if urlparse(self.path).path in _PWA_ASSETS:
+            return self._send_pwa_asset(urlparse(self.path).path)
         if not self._authorized():
             return self._send_auth_challenge()
         u = urlparse(self.path); q = parse_qs(u.query)
@@ -1250,6 +1305,11 @@ def main():
 _pill = lambda n, on: f'<span class="feed {"on" if on else "off"}">● {n}</span>'
 _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Meridian Terminal</title>
+<link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#0A0E15">
+<link rel="icon" href="/static/icon-192.png"><link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Meridian">
+<script>if('serviceWorker' in navigator)addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}))</script>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
  :root{--bg:#0A0E15;--panel:#10161F;--panel2:#161F2B;--line:#232F3D;--txt:#C9D6E2;--dim:#6B7E92;
