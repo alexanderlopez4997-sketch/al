@@ -1387,7 +1387,7 @@ function clock(){const n=new Date(new Date().toLocaleString('en-US',{timeZone:'A
  $('sess').textContent=s;const live=s!=='CLOSED';$('stream').textContent=(live?(n.getSeconds()%2?'○':'●'):'○')+(live?' STREAMING':' IDLE');
  $('stream').style.color=live?'var(--buy)':'var(--dim)';}
 setInterval(clock,1000);clock();
-function view(v){V=v;document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.v===v));
+function view(v){V=v;$('wlnote').textContent='';document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.v===v));
  $('wlrow').style.display=(v==='dash'||v==='heat'||v==='ah'||v==='dod'||v==='mb')?'flex':'none';
  if(timer){clearInterval(timer);timer=null;}
  if(v==='dash'){refresh();timer=setInterval(refresh,30000);}
@@ -1398,8 +1398,9 @@ function view(v){V=v;document.querySelectorAll('.tab').forEach(t=>t.classList.to
  else if(v==='mb')morning_(); else if(v==='tr')load('/api/trackrecord','track record');
  else if(v==='diag'){loadDiagnostics();timer=setInterval(loadDiagnostics,5000);}
  else if(v==='analyze')$('main').innerHTML='<div class="muted">Type a ticker → Analyze.</div>';}
-async function watchlist_(){$('main').innerHTML='<div class="loader">Loading watchlist categories…</div>';
+async function watchlist_(){const my=V;$('main').innerHTML='<div class="loader">Loading watchlist categories…</div>';
  try{const cats=await(await fetch('/api/categories')).json();
+  if(V!==my)return;
   let h='<div style="padding:20px"><h2 style="color:#C8A24B;margin-bottom:16px">Watchlist Categories</h2>';
   h+='<p style="color:#6B7E92;margin-bottom:20px">Select a category to run ML edge detection across all tickers</p>';
   h+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">';
@@ -1409,19 +1410,21 @@ async function watchlist_(){$('main').innerHTML='<div class="loader">Loading wat
     <div style="font-size:12px;color:#6B7E92;margin-bottom:8px">${v.desc}</div>
     <div style="font-size:11px;color:#4F9DE0">${v.count} tickers</div></div>`;}
   h+='</div></div>';$('main').innerHTML=h;
- }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
-async function screenCategory(cat){$('main').innerHTML='<div class="loader">Screening '+cat+' category…</div>';
+ }catch(e){if(V!==my)return;$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+async function screenCategory(cat){const my=V;$('main').innerHTML='<div class="loader">Screening '+cat+' category…</div>';
  try{const d=await(await fetch('/api/category_screen?category='+cat+'&demo='+demo())).json();
+  if(V!==my)return;
   if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}
   const f=document.createElement('iframe');f.srcdoc=d.html;$('main').innerHTML='';$('main').appendChild(f);
- }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
-async function refresh(){$('wlnote').textContent='updating…';
+ }catch(e){if(V!==my)return;$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+async function refresh(){const my=V;$('wlnote').textContent='updating…';
  try{const [d, cats, ah, gov, dod]=await Promise.all([
   fetch('/api/watchlist?demo='+demo()+'&tickers='+wl()).then(r=>r.json()),
   fetch('/api/categories').then(r=>r.json()),
   fetch('/api/afterhours?demo='+demo()+'&tickers='+wl()).then(r=>r.json()).catch(()=>({})),
   fetch('/api/gov_contracts?demo='+demo()+'&tickers='+wl()).then(r=>r.json()).catch(()=>({})),
   fetch('/api/dod_awards?demo='+demo()+'&tickers='+wl()).then(r=>r.json()).catch(()=>({}))]);
+  if(V!==my)return;
   if(!Array.isArray(d)){$('main').innerHTML='<div class="card" style="color:var(--sell)">Watchlist unavailable: '+((d&&d.error)||'unexpected response')+'</div>';$('wlnote').textContent='';return;}
   let h='<div style="padding:0">';
   h+='<div class="ahsplit even" style="margin-bottom:20px"><section><h2>SEC EDGAR NEWS</h2><div class="scrollbox">';
@@ -1450,11 +1453,12 @@ async function refresh(){$('wlnote').textContent='updating…';
      <span style="font-size:10px;color:var(--dim)">${v.count} tickers</span>
      <span style="color:var(--blue);font-weight:700">→</span></div></div>`;}
   h+='</div></div>';$('main').innerHTML=h;$('wlnote').textContent='updated '+new Date().toLocaleTimeString();
- }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
-async function go(){const t=$('tk').value.trim().toUpperCase()||'NVDA';
+ }catch(e){if(V!==my)return;$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+async function go(){const my=V;const t=$('tk').value.trim().toUpperCase()||'NVDA';
  $('main').innerHTML='<div class="loader">Analyzing '+t+'… technicals, fundamentals, alt-data, order flow…</div>';
  try{const [a,o]=await Promise.all([fetch('/api/analyze?demo='+demo()+'&ticker='+t).then(r=>r.json()),
     fetch('/api/ohlc?demo='+demo()+'&ticker='+t).then(r=>r.json())]);
+  if(V!==my)return;
   if(a.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+a.error+'</div>';return;}
   const cls=a.tone==='good'?'good':a.tone==='bad'?'bad':'neutral',cc=a.chg>=0?'var(--buy)':'var(--sell)';
   $('main').innerHTML='<div class="hd"><span class="tk">'+a.ticker+'</span>'
@@ -1466,17 +1470,18 @@ async function go(){const t=$('tk').value.trim().toUpperCase()||'NVDA';
    +'<div class="card"><details><summary style="cursor:pointer;color:var(--gold);font-weight:700;letter-spacing:1px;font-size:13px">RESEARCH — company overview · valuation · quality · ownership</summary>'
    +'<div style="margin-top:12px">'+(a.research_html||'')+'</div></details></div>';
   if(!o.error)drawChart(o.bars);
- }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+ }catch(e){if(V!==my)return;$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 function drawChart(bars){const el=$('chart');if(!el||!window.LightweightCharts||!bars||!bars.length)return;
  chart=LightweightCharts.createChart(el,{autoSize:true,layout:{background:{color:'#10161F'},textColor:'#C9D6E2'},
    grid:{vertLines:{color:'#1b2532'},horzLines:{color:'#1b2532'}},rightPriceScale:{borderColor:'#232F3D'},
    timeScale:{borderColor:'#232F3D'},crosshair:{mode:0}});
  const s=chart.addCandlestickSeries({upColor:'#2ECC8F',downColor:'#FF5449',wickUpColor:'#2ECC8F',wickDownColor:'#FF5449',borderVisible:false});
  s.setData(bars);chart.timeScale().fitContent();}
-async function load(url,name){$('main').innerHTML='<div class="loader">Loading '+name+'…</div>';
+async function load(url,name){const my=V;$('main').innerHTML='<div class="loader">Loading '+name+'…</div>';
  try{const d=await(await fetch(url+'?demo='+demo()+'&tickers='+wl())).json();
+  if(V!==my)return;
   $('main').innerHTML=d.error?'<div class="card" style="color:var(--sell)">'+d.error+'</div>':d.html;
- }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+ }catch(e){if(V!==my)return;$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 async function heatmap_(){
  if(!$('main').querySelector('.heatgrid'))$('main').innerHTML='<div class="loader">Loading heat map…</div>';
  try{const q='?demo='+demo()+'&tickers='+wl();
@@ -1520,18 +1525,21 @@ function newsFilter(cat,btn){
  document.querySelectorAll('.newsbar .filt').forEach(b=>b.classList.toggle('active',b===btn));
  document.querySelectorAll('.newstable tbody tr').forEach(tr=>{
   tr.style.display=(cat==='all'||(tr.dataset.cat||'').split(' ').includes(cat))?'':'none';});}
-async function screen_(){$('main').innerHTML='<div class="loader">Screening…</div>';
+async function screen_(){const my=V;$('main').innerHTML='<div class="loader">Screening…</div>';
  try{const d=await(await fetch('/api/screen?demo='+demo()+'&tickers='+wl())).json();
+  if(V!==my)return;
   if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}
   const f=document.createElement('iframe');f.srcdoc=d.html;$('main').innerHTML='';$('main').appendChild(f);
- }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
-async function mlscreen_(){$('main').innerHTML='<div class="loader">Running ML screen…</div>';
+ }catch(e){if(V!==my)return;$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+async function mlscreen_(){const my=V;$('main').innerHTML='<div class="loader">Running ML screen…</div>';
  try{const d=await(await fetch('/api/ml_screen?demo='+demo()+'&tickers='+wl())).json();
+  if(V!==my)return;
   if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}
   const f=document.createElement('iframe');f.srcdoc=d.html;$('main').innerHTML='';$('main').appendChild(f);
- }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
-async function loadDiagnostics(){
+ }catch(e){if(V!==my)return;$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+async function loadDiagnostics(){const my=V;
  try{const d=await(await fetch('/api/diagnostics?demo='+demo()+'&tickers='+wl())).json();
+  if(V!==my)return;
   if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}
   let h='<div class="diag-panel"><div class="diag-col"><div style="padding:10px 0"><h3>📊 Strategy Health</h3>';
   const h_status=d.health_status||{};const regime=h_status.regime||'neutral';
@@ -1558,7 +1566,7 @@ async function loadDiagnostics(){
   h+='<div style="font-size:11px;margin-bottom:6px">Last Trade Venue</div>';
   for(const[sym,venue] of Object.entries(lastEx)){h+=`<div>${sym}: ${venue||'—'}</div>`;}
   h+='</div></div></div></div>';$('main').innerHTML=h;
- }catch(e){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+ }catch(e){if(V!==my)return;$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 view('dash');
 </script></body></html>""")
 
