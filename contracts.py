@@ -282,10 +282,12 @@ def contract_signal(summary, market_cap=None, ttm_revenue=None):
         top = summary["latest"][0]
         detail += f" · {top['agency']} {top['date']}"
 
+    latest_date = summary["latest"][0]["date"] if summary["latest"] else None
     return {
         "signal": float(np.clip(ratio, -1, 1)),
         "confidence": float(confidence),
         "detail": detail,
+        "award_date": latest_date or None,   # lets contract_crosscheck line up EDGAR filings
     }
 
 
