@@ -45,6 +45,11 @@ The launcher creates `.venv` and installs `requirements.txt` on first run, then
 starts the server and opens your browser. Or run it directly with
 `python3 web_server.py`.
 
+For a desktop icon, run `python3 install_shortcut.py` once (`--remove` undoes it): a
+`Meridian` shortcut on the Desktop on Windows, a `Meridian.command` file on macOS, or
+a Desktop + app-menu entry on Linux. It points at this folder, so re-run it if you
+move the folder.
+
 It serves `http://127.0.0.1:8788` on this machine only (set `MERIDIAN_WEB_PORT` to
 override). To also open it on your phone (same Wi-Fi network), start it with:
 
