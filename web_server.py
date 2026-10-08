@@ -1270,8 +1270,17 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  #wl{width:340px;font-family:ui-monospace,monospace;font-size:12px}
  button{background:var(--buy);color:#04140c;font-weight:700;padding:8px 18px;cursor:pointer;border:none}
  button:hover{filter:brightness(1.1)}
- .tabs{display:flex;gap:4px}.tab{padding:8px 14px;background:transparent;color:var(--dim);border:none;border-radius:5px;cursor:pointer}
- .tab.active{background:var(--panel2);color:var(--gold)}.toggle{color:var(--dim);display:flex;align-items:center;gap:6px;cursor:pointer}
+ .shell{flex:1;display:flex;min-height:0}
+ .content{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+ .tabs{display:flex;flex-direction:column;gap:2px;width:170px;flex:none;overflow-y:auto;padding:10px 8px;
+   background:var(--panel);border-right:1px solid var(--line)}
+ .tab{padding:10px 14px;background:transparent;color:var(--dim);border:none;border-left:3px solid transparent;
+   border-radius:5px;cursor:pointer;text-align:left;white-space:nowrap}
+ .tab.active{background:var(--panel2);color:var(--gold);border-left-color:var(--gold)}
+ .toggle{color:var(--dim);display:flex;align-items:center;gap:6px;cursor:pointer}
+ @media(max-width:700px){.shell{flex-direction:column}
+   .tabs{flex-direction:row;width:auto;overflow-x:auto;overflow-y:hidden;border-right:0;border-bottom:1px solid var(--line);padding:6px 8px}
+   .tab{border-left:0;border-bottom:3px solid transparent}.tab.active{border-bottom-color:var(--gold)}}
  .main{flex:1;overflow:auto;padding:18px}
  .hd{display:flex;align-items:baseline;gap:14px;margin-bottom:10px}.tk{font-size:30px;font-weight:800}
  .px{font-family:ui-monospace,monospace;font-size:18px}.badge{margin-left:auto;padding:6px 16px;border-radius:6px;font-weight:800;letter-spacing:1px}
@@ -1361,8 +1370,8 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
   <div class="sublabel">SYSTEM</div></div>
   <div class="spacer"></div><span class="pill" id="sess">—</span><span class="clock" id="clock">--:--:-- ET</span></div>
 <div class="feeds"><span class="lbl">DATA FEEDS</span>__FEEDS__<span class="stream" id="stream">● STREAMING</span></div>
-<div class="ctrl">
-  <div class="tabs">
+<div class="shell">
+<nav class="tabs">
     <button class="tab active" data-v="dash" onclick="view('dash')">Dashboard</button>
     <button class="tab" data-v="analyze" onclick="view('analyze')">Analyze</button>
     <button class="tab" data-v="screen" onclick="view('screen')">Screener</button>
@@ -1374,7 +1383,9 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
     <button class="tab" data-v="dod" onclick="view('dod')">DoD Awards</button>
     <button class="tab" data-v="mb" onclick="view('mb')">Morning</button>
     <button class="tab" data-v="tr" onclick="view('tr')">Track Record</button>
-  </div>
+</nav>
+<div class="content">
+<div class="ctrl">
   <span class="spacer"></span>
   <input id="tk" value="NVDA" onkeydown="if(event.key==='Enter'){view('analyze');go()}">
   <button onclick="view('analyze');go()">Analyze</button>
@@ -1384,6 +1395,7 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
   <input id="wl" value="NVDA,AMD,AAPL,MSFT,TSLA,SOFI,PLTR,AMZN">
   <button onclick="refresh()">Refresh</button><span class="muted" id="wlnote"></span></div>
 <div class="main" id="main"></div>
+</div></div>
 <script>
 const $=id=>document.getElementById(id); let V='dash', chart=null, timer=null;
 function demo(){return $('demo').checked?1:0} function wl(){return encodeURIComponent($('wl').value)}
