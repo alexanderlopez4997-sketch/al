@@ -38,10 +38,14 @@ python3 quant_engine.py --positions                  # Show all
 ## Web Terminal (browser dashboard)
 
 ```bash
-python3 web_server.py
+./meridian.sh          # macOS / Linux  (Windows: double-click meridian.bat)
 ```
 
-Opens `http://127.0.0.1:8788` on this machine only (set `MERIDIAN_WEB_PORT` to
+The launcher creates `.venv` and installs `requirements.txt` on first run, then
+starts the server and opens your browser. Or run it directly with
+`python3 web_server.py`.
+
+It serves `http://127.0.0.1:8788` on this machine only (set `MERIDIAN_WEB_PORT` to
 override). To also open it on your phone (same Wi-Fi network), start it with:
 
 ```bash
@@ -51,6 +55,16 @@ MERIDIAN_WEB_HOST=0.0.0.0 python3 web_server.py
 The server prints the link to open on your phone. The dashboard has **no
 login**, so only do this on a network you trust — see `deploy/DEPLOY.md` for
 deploying it behind auth on a VPS.
+
+### Install as an app
+
+The dashboard is an installable web app (manifest + service worker). With
+`web_server.py` running, open it in Chrome or Edge and click the install icon in
+the address bar (or menu → *Install Meridian Terminal*); it then opens in its own
+window with its own icon. On iOS, use Safari → Share → *Add to Home Screen*. Browsers
+only offer install on `localhost` or HTTPS, so a phone reaching it over plain
+`http://<lan-ip>` can add a shortcut but not a full install. The app still needs
+`web_server.py` running; it only caches the install assets, never market data.
 
 ## Email Alerts (Gmail)
 
