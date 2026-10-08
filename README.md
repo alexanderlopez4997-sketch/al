@@ -95,6 +95,27 @@ Or fire a per-ticker alert the moment its conviction score clears a threshold
 python3 quant_engine.py AAPL MSFT NVDA TSLA --discord-alerts --discord-threshold 80
 ```
 
+## Government-Contract Backtest
+
+`contract_backtest.py` is an event study of the contract signals on real history: is there
+post-award drift, does it scale with award size ÷ market cap, how long does it last, and do
+the EDGAR cross-check flags (`contract_crosscheck.py`) separate good awards from bad ones?
+
+```bash
+# from a CSV of awards (columns: date, recipient or ticker, amount)
+python3 contract_backtest.py --csv awards.csv --start 2018-01-01 --end 2025-12-31
+# or pull DoD obligations from USAspending.gov
+python3 contract_backtest.py --usaspending --start 2022-01-01 --end 2025-12-31
+# re-run at several disclosure lags: a conclusion that flips with --lag-days is not a conclusion
+python3 contract_backtest.py --csv awards.csv --start 2018-01-01 --end 2025-12-31 --lag-days 0
+```
+
+Needs outbound access to `api.usaspending.gov`, `www.sec.gov`, `data.sec.gov` and Yahoo Finance.
+It writes `contract_backtest_report.md` and a per-event CSV. Flags that only become public
+after the award are compared from a later *checkpoint*, so the offering's own price drop is not
+credited to the flag. Read the report's "Limits" section: survivorship bias, disclosure-lag
+guesses and clustered events all apply.
+
 ## Example Output
 
 ### Dashboard (Multi-Stock View)

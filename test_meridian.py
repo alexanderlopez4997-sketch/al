@@ -38,6 +38,7 @@ import tui_dashboard as td
 import signal_scoring as ss
 import quant_gui as qg
 import web_server as ws
+import contract_backtest as cbt
 import contract_crosscheck as cc
 import contracts
 import dod_scraper
@@ -1713,6 +1714,262 @@ check("confirm: insider buying around an award is not an extra vote",
       _ccrow(_cc_buy)[1] == "na" and (_cc_buy["passed"], _cc_buy["checkable"]) == (_base_cc["passed"], _base_cc["checkable"]))
 check("confirm: malformed cross-check input never raises",
       all(_ccrow(cf.confirm(dict(_ccv, contract_crosscheck=x)))[1] == "na" for x in (None, {}, "junk", {"a": None}, {"a": "x"})))
+
+# ------------------------------------------------------ contract backtest ----
+section("contract backtest")
+import datetime as _dt2
+
+D = _dt2.date
+# --- events: aggregation, threshold, cooldown, unmapped
+_aw = [{"date": D(2020, 3, 2), "amount": 6e6, "recipient": "Acme", "ticker": "AAA"},
+       {"date": D(2020, 3, 2), "amount": 7e6, "recipient": "Acme", "ticker": "AAA"},
+       {"date": D(2020, 3, 2), "amount": -9e6, "recipient": "Acme", "ticker": "AAA"},       # de-obligation ignored
+       {"date": D(2020, 3, 9), "amount": 50e6, "recipient": "Acme", "ticker": "AAA"},       # inside cooldown
+       {"date": D(2020, 5, 4), "amount": 20e6, "recipient": "Acme", "ticker": "AAA"},       # after cooldown
+       {"date": D(2020, 3, 2), "amount": 5e6, "recipient": "Tiny", "ticker": "BBB"},        # below min
+       {"date": D(2020, 3, 2), "amount": 99e6, "recipient": "Mystery Co", "ticker": None}]  # unmapped
+_ev = cbt.build_events(_aw, ticker_fn=lambda n: None, min_value=10e6, cooldown_days=30)
+check("build_events sums a day, drops de-obligations/small/unmapped",
+      [(e["ticker"], e["date"], e["value_usd"], e["n"]) for e in _ev] == [("AAA", D(2020, 3, 2), 13e6, 2), ("AAA", D(2020, 5, 4), 20e6, 1)])
+check("build_events cooldown drops overlapping later event", D(2020, 3, 9) not in [e["date"] for e in _ev])
+check("build_events maps recipient names through the DoD ticker map by default",
+      [e["ticker"] for e in cbt.build_events([{"date": D(2020, 3, 2), "amount": 5e8, "recipient": "Lockheed Martin Corp."}])] == ["LMT"])
+check("bucket_for edges match contracts.py bands",
+      [cbt.bucket_for(x) for x in (0.0099, 0.01, 0.0499, 0.05, 0.1499, 0.15, 7.0)]
+      == ["<1%", "1-5%", "1-5%", "5-15%", "5-15%", ">15%", ">15%"])
+check("unadjust multiplies closes by LATER splits only",
+      list(cbt.unadjust(pd.Series([10.0, 10.0, 5.0, 5.0], index=pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-03", "2020-01-06"])),
+                       pd.Series([2.0], index=pd.to_datetime(["2020-01-03"])))) == [20.0, 20.0, 5.0, 5.0])
+
+# --- study_event timing + look-ahead guarantees
+_bidx = pd.bdate_range("2020-01-01", "2020-12-31")
+_flat = pd.Series(100.0, index=_bidx)
+def _px(series): return pd.DataFrame({"adj": series, "unadj": series})
+_evt = {"ticker": "X", "date": D(2020, 6, 1), "value_usd": 1e7}          # Monday
+_i0 = _bidx.searchsorted(pd.Timestamp("2020-06-02"))                       # lag 1 -> Tue
+_jump0 = _flat.copy(); _jump0.iloc[_i0:] *= 1.10                          # +10% ON the entry day
+_jump1 = _flat.copy(); _jump1.iloc[_i0 + 1:] *= 1.10                      # +10% the day AFTER entry
+_s0, _s1 = cbt.study_event(_evt, _px(_jump0), _flat), cbt.study_event(_evt, _px(_jump1), _flat)
+check("entry = first trading day on/after action date + lag", _s0["entry_date"] == "2020-06-02")
+check("move ON the entry day is reported as day-0 but never earned", abs(_s0["day0_ar"] - 0.10) < 1e-9 and abs(_s0["ar"][1]) < 1e-9)
+check("move the day AFTER entry is earned at h=1", abs(_s1["ar"][1] - 0.10) < 1e-9)
+check("weekend info date rolls to Monday entry",
+      cbt.study_event({"ticker": "X", "date": D(2020, 6, 5), "value_usd": 1}, _px(_flat), _flat, lag_days=1)["entry_date"] == "2020-06-08")
+_hist = _flat.copy(); _hist.iloc[:_i0 - 3] *= 0.5                         # rewrite history before entry
+_fut = _flat.copy(); _fut.iloc[_i0 + 70:] *= 3.0                          # rewrite far future (beyond all horizons)
+_sh, _sf = cbt.study_event(_evt, _px(_hist), _flat), cbt.study_event(_evt, _px(_fut), _flat)
+_base = cbt.study_event(_evt, _px(_flat), _flat)
+check("forward returns ignore anything before entry (only pre_ar moves)", _sh["ar"] == _base["ar"] and _sh["profile"] == _base["profile"])
+check("rewriting pre-entry history changes pre_ar", abs(_sh["pre_ar"]) > 0.5)
+check("forward returns ignore bars beyond the horizon", all(abs(_sf["ar"][h]) < 1e-12 for h in cbt.HORIZONS))
+check("study_event None when too little history / no forward bars / entry far from info date",
+      cbt.study_event({"ticker": "X", "date": D(2020, 12, 30), "value_usd": 1}, _px(_flat), _flat) is None
+      and cbt.study_event({"ticker": "X", "date": D(2020, 1, 3), "value_usd": 1}, _px(_flat), _flat) is None
+      and cbt.study_event({"ticker": "X", "date": D(2021, 6, 1), "value_usd": 1}, _px(_flat), _flat) is None)
+check("checkpoint is strictly after the cross-check window",
+      _s0["checkpoint_date"] > (D(2020, 6, 1) + _dt2.timedelta(days=cc.DILUTION_WINDOW_DAYS)).isoformat())
+
+# --- statistics
+check("boot_summary deterministic for a seed, drops NaN/None",
+      cbt.boot_summary([0.1, -0.02, float("nan"), None, 0.05], seed=3) == cbt.boot_summary([0.1, -0.02, 0.05], seed=3))
+check("boot_summary empty -> n=0; CI brackets the mean",
+      cbt.boot_summary([]) == {"n": 0} and (lambda s: s["ci"][0] <= s["mean"] <= s["ci"][1])(cbt.boot_summary(list(np.linspace(-1, 2, 50)))))
+check("boot_diff recovers a clear gap and returns None on empty",
+      (lambda d: d["ci"][0] > 0.9 and abs(d["diff"] - 1.05) < 1e-9)(cbt.boot_diff([2.0] * 20 + [2.1] * 20, [1.0] * 40)) and cbt.boot_diff([], [1.0]) is None)
+
+# --- synthetic world with a KNOWN effect
+def _world(n_clean=60, n_dil=30, n_buy=0, clean_drift=0.003, dil_post_drift=-0.003, dil_jump=-0.05, seed=11):
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range("2019-01-01", "2021-12-31")
+    bret = rng.normal(0, 0.004, len(idx))
+    prices, events, dil_filings, buys = {}, [], {}, {}
+    spans = pd.bdate_range("2019-06-03", "2021-03-01")[::3]
+    kinds = ["clean"] * n_clean + ["dil"] * n_dil + ["buy"] * n_buy
+    for k, kind in enumerate(kinds):
+        tk = f"{kind[0].upper()}{k:02d}"
+        award = spans[(k * 7) % len(spans)].date()
+        r = bret + rng.normal(0, 0.004, len(idx))
+        i0 = int(idx.searchsorted(pd.Timestamp(award) + pd.Timedelta(days=1)))
+        icp = int(idx.searchsorted(pd.Timestamp(award) + pd.Timedelta(days=cc.DILUTION_WINDOW_DAYS), side="right"))
+        if kind in ("clean", "buy"):
+            r[i0 + 1:i0 + 41] += clean_drift
+        else:
+            j = int(idx.searchsorted(pd.Timestamp(award) + pd.Timedelta(days=5)))
+            r[j] += dil_jump
+            r[icp + 1:icp + 21] += dil_post_drift
+            dil_filings[tk] = [{"form": "424B5", "date": (award + _dt2.timedelta(days=5)).isoformat()}]
+        if kind == "buy":
+            buys[tk] = [{"code": "P", "usd": 300_000.0, "owner": "CEO", "is_10b5_1": False,
+                         "accepted": (award - _dt2.timedelta(days=7)).isoformat() + "T15:00:00.000Z"}]
+        s = pd.Series(50.0 * np.cumprod(1 + r), index=idx)
+        prices[tk] = pd.DataFrame({"adj": s, "unadj": s})
+        events.append({"ticker": tk, "date": award, "value_usd": 5e7, "n": 1, "recipients": []})
+    prices["SPY"] = pd.DataFrame({"adj": pd.Series(100.0 * np.cumprod(1 + bret), index=idx)})
+    return events, prices, dil_filings, buys
+
+def _run(world, **kw):
+    events, prices, dil, buys = world
+    return cbt.run_backtest(
+        events, lambda t: prices.get(t), lambda t, d: 2e7,           # 2e7 sh x ~$50 ~ $1B cap -> ~5% ratio
+        lambda t, s, e: [f for f in dil.get(t, []) if str(s) <= f["date"] <= str(e)],
+        lambda t, s, e: buys.get(t, []), n_boot=600, **kw)
+
+_w = _world(n_buy=25)
+_r = _run(_w)
+check("backtest studies the events and tracks drops", _r["n_studied"] > 100 and _r["n_studied"] + sum(_r["dropped"].values()) == _r["n_events_in"])
+check("production cross-check labels the groups", {r["group"] for r in _r["rows"]} == {"clean", "dilution", "insider_buy"}
+      and all(r["group"] == "dilution" for r in _r["rows"] if r["ticker"].startswith("D")))
+check("size bucket follows value / (shares x unadjusted price at entry)",
+      all(r["bucket"] == cbt.bucket_for(r["ratio"]) and abs(r["ratio"] - r["value_usd"] / r["mcap"]) < 1e-12
+          and abs(r["mcap"] - 2e7 * r["price0"]) < 1e-3 for r in _r["rows"])
+      and sum(_r["by_bucket"][lab][20]["n"] for _, _, lab in cbt.BUCKETS) == sum(1 for r in _r["rows"] if np.isfinite(r["ar"][20])))
+_big = cbt.run_backtest(_w[0][:30], lambda t: _w[1].get(t), lambda t, d: 2e9, n_boot=200)
+check("a 100x bigger cap moves every award into the '<1%' bucket", {r["bucket"] for r in _big["rows"]} == {"<1%"})
+_cl = _r["by_group_entry"]["clean"][20]
+check("recovers real drift for clean awards (+0.3%/day -> ~+6% AR at 20d, CI excludes 0)", _cl["ci"][0] > 0.03)
+_m = _r["multiplier_check"]
+check("flag with a REAL post-checkpoint effect is 'supported' (dilution @10d and @20d)",
+      _m[("dilution", 10)]["verdict"] == "supported" and _m[("dilution", 20)]["verdict"] == "supported"
+      and _m[("dilution", 10)]["diff"]["ci"][1] < 0)
+check("insider_buy compared from entry, supported when it really leads", _m[("insider_buy", 20)]["basis"] == "entry"
+      and _m[("insider_buy", 20)]["verdict"] in ("inconclusive (CI includes 0)", "supported"))
+check("implied ratio only given when clean drift is itself significant",
+      _m[("dilution", 20)]["implied_ratio"] is not None and _m[("dilution", 20)]["implied_ratio"] < 0.5)
+check("a flag that REVERSES the edge is reported as stronger than the shrink-only multiplier",
+      _m[("dilution", 20)]["magnitude"] == "stronger than modelled" and _m[("insider_buy", 20)]["magnitude"] is None)
+check("pre-entry drift ~0 and announcement-day move ~0 in a world with neither", abs(_r["pre_drift"]["mean"]) < 0.01)
+check("decay check usable and reports model comparison", _r["decay"]["usable"] and set(_r["decay"]["realized"]) == {5, 10, 20, 40})
+
+# the look-ahead TRAP: the offering's own price drop, no real post-checkpoint edge
+_t = _run(_world(clean_drift=0.0, dil_post_drift=0.0, dil_jump=-0.06, seed=5))
+_te = cbt.boot_diff([r["ar"][10] for r in _t["rows"] if r["group"] == "dilution"],
+                   [r["ar"][10] for r in _t["rows"] if r["group"] == "clean"], n_boot=600)
+check("from-ENTRY comparison is fooled by the offering drop (the trap exists)", _te["ci"][1] < 0)
+check("tradeable from-CHECKPOINT comparison is NOT fooled (no verdict of 'supported')",
+      _t["multiplier_check"][("dilution", 10)]["verdict"] != "supported")
+
+# underpowered / robustness / reporting
+_small = _run(_world(n_clean=6, n_dil=4))
+check("tiny samples are labelled underpowered, never 'supported'",
+      all(c["verdict"].startswith("inconclusive") for c in _small["multiplier_check"].values()))
+check("report renders sections, warns on small n, and states limits",
+      all(x in cbt.format_report(_small) for x in ("Is there drift?", "Multiplier check", "⚠", "Survivorship", "lag-days")))
+check("report for zero studied events explains rather than crashing",
+      "No events could be studied" in cbt.format_report(cbt.run_backtest([], lambda t: _w[1].get(t), lambda t, d: 1e7)))
+try:
+    cbt.run_backtest([_w[0][0]], lambda t: None, lambda t, d: 1e7); _no_bench = False
+except cbt.DataUnavailable:
+    _no_bench = True
+check("missing benchmark raises DataUnavailable (blocked network surfaces loudly)", _no_bench)
+_nosh = cbt.run_backtest(_w[0][:5], lambda t: _w[1].get(t), lambda t, d: None)
+check("events without point-in-time shares are dropped and counted, not guessed",
+      _nosh["n_studied"] == 0 and _nosh["dropped"]["no_shares"] + _nosh["dropped"]["no_window"] == 5)
+_noflags = cbt.run_backtest(_w[0][:30], lambda t: _w[1].get(t), lambda t, d: 2e7)
+check("no EDGAR sources -> group 'unknown', cross-check section skipped",
+      {r["group"] for r in _noflags["rows"]} == {"unknown"} and _noflags["multiplier_check"] == {}
+      and "not tested" in cbt.format_report(_noflags))
+with tempfile.TemporaryDirectory() as _td:
+    _p = os.path.join(_td, "e.csv"); cbt.rows_to_csv(_r["rows"], _p)
+    _lines = open(_p).read().splitlines()
+    check("rows_to_csv writes a header + one line per event", len(_lines) == _r["n_studied"] + 1 and _lines[0].startswith("ticker,"))
+    # awards CSV loading
+    _c = os.path.join(_td, "a.csv")
+    open(_c, "w").write("Action_Date,Recipient_Name,Transaction_Amount,Ticker\n2020-03-02,Acme Inc,\"$12,000,000\",aaa\nbad,Acme,1,\n2020-03-03,Acme,notanumber,\n")
+    _aw2, _bad = cbt.awards_from_csv(_c)
+    check("awards_from_csv: flexible headers, money parsing, bad rows counted",
+          len(_aw2) == 1 and _bad == 2 and _aw2[0]["amount"] == 12e6 and _aw2[0]["ticker"] == "AAA" and _aw2[0]["date"] == D(2020, 3, 2))
+    open(os.path.join(_td, "b.csv"), "w").write("foo,bar\n1,2\n")
+    try:
+        cbt.awards_from_csv(os.path.join(_td, "b.csv")); _bad_hdr = False
+    except ValueError:
+        _bad_hdr = True
+    check("awards_from_csv rejects a CSV with no usable columns", _bad_hdr)
+    _o1, _o2 = os.path.join(_td, "r.md"), os.path.join(_td, "r.csv")
+    check("CLI returns 2 (not a traceback) when the awards file is missing",
+          cbt.main(["--csv", os.path.join(_td, "nope.csv"), "--start", "2020-01-01", "--end", "2020-12-31",
+                   "--out-md", _o1, "--out-csv", _o2]) == 2)
+
+# --- USAspending parsing + paging (response shape per the public API; not exercised live)
+_rows = [{"Recipient Name": "Acme Inc", "Action Date": "2020-03-02", "Transaction Amount": 25e6, "Awarding Agency": "DoD"},
+         {"Recipient Name": "Acme Inc", "Action Date": "2020-03-03", "Transaction Amount": -5e6},
+         {"Recipient Name": "Acme Inc", "Action Date": "garbage", "Transaction Amount": 5e6}]
+_pa, _pb = cbt.awards_from_usaspending_rows(_rows)
+check("usaspending rows: obligations kept, de-obligations/garbage skipped", len(_pa) == 1 and _pb == 2 and _pa[0]["amount"] == 25e6)
+_calls = []
+def _fake_post(payload):
+    _calls.append(payload)
+    big = [{"Recipient Name": "Acme", "Action Date": payload["filters"]["time_period"][0]["start_date"], "Transaction Amount": 30e6}]
+    small = [{"Recipient Name": "Acme", "Action Date": payload["filters"]["time_period"][0]["start_date"], "Transaction Amount": 1e6}]
+    return {"results": big if payload["page"] == 1 else small, "page_metadata": {"hasNext": True}}
+_fa, _ = cbt.fetch_usaspending("2020-01-15", "2020-03-20", min_amount=10e6, post=_fake_post)
+check("fetch_usaspending: one query window per month, clipped to the range, stops paging below min amount",
+      len(_calls) == 6 and [c["filters"]["time_period"][0]["start_date"] for c in _calls[::2]] == ["2020-01-15", "2020-02-01", "2020-03-01"]
+      and _calls[-1]["filters"]["time_period"][0]["end_date"] == "2020-03-20" and len(_fa) == 3)
+def _raises_du(fn):
+    try:
+        fn(); return False
+    except cbt.DataUnavailable:
+        return True
+check("fetch_usaspending surfaces a failed request as DataUnavailable",
+      _raises_du(lambda: cbt.fetch_usaspending("2020-01-01", "2020-01-31", post=lambda p: (_ for _ in ()).throw(cbt.DataUnavailable("x")))))
+with unittest.mock.patch("urllib.request.urlopen", side_effect=OSError("Tunnel connection failed: 403 Forbidden")):
+    check("a blocked USAspending connection becomes DataUnavailable naming the likely cause",
+          _raises_du(lambda: cbt.fetch_usaspending("2020-01-01", "2020-01-31", min_amount=1e6)))
+
+# --- EDGAR historical helpers
+_cf = {"facts": {"dei": {"EntityCommonStockSharesOutstanding": {"units": {"shares": [
+    {"end": "2019-12-31", "val": 100e6, "accn": "a1", "filed": "2020-02-20"},
+    {"end": "2020-03-31", "val": 110e6, "accn": "a2", "filed": "2020-05-08"},
+    {"end": "2020-03-31", "val": 40e6, "accn": "a2", "filed": "2020-05-08"},          # second share class
+    {"end": "2020-06-30", "val": 999e6, "accn": "a3", "filed": "2020-08-07"}]}}}}}
+check("shares as-of uses FILING dates: a later filing can't leak into an earlier date",
+      edgar._shares_from_companyfacts(_cf, "2020-03-01") == 100e6 and edgar._shares_from_companyfacts(_cf, "2020-06-01") == 150e6
+      and edgar._shares_from_companyfacts(_cf, "2020-01-01") is None and edgar._shares_from_companyfacts(_cf, "2021-01-01") == 999e6)
+check("shares fall back to us-gaap, and garbage input is None",
+      edgar._shares_from_companyfacts({"facts": {"us-gaap": {"CommonStockSharesOutstanding": {"units": {"shares": [
+          {"end": "2019-12-31", "val": 7e6, "filed": "2020-02-01"}]}}}}}, "2020-06-01") == 7e6
+      and edgar._shares_from_companyfacts({}, "2020-06-01") is None and edgar._shares_from_companyfacts(None, "2020-06-01") is None)
+check("_raw_form4_url strips the XSL rendering folder only",
+      edgar._raw_form4_url("https://www.sec.gov/Archives/edgar/data/1/2/xslF345X05/f4.xml") == "https://www.sec.gov/Archives/edgar/data/1/2/f4.xml"
+      and edgar._raw_form4_url("https://www.sec.gov/Archives/edgar/data/1/2/f4.xml") == "https://www.sec.gov/Archives/edgar/data/1/2/f4.xml")
+_recent = {"form": ["424B5", "4", "10-Q"], "filingDate": ["2020-06-03", "2020-06-02", "2020-05-01"],
+           "acceptanceDateTime": ["2020-06-03T21:00:00.000Z", "2020-06-02T21:00:00.000Z", ""],
+           "accessionNumber": ["0001-20-3", "0001-20-2", "0001-20-1"], "primaryDocument": ["a.htm", "xslF345X05/f4.xml", "q.htm"]}
+_old = {"form": ["S-3", "4"], "filingDate": ["2018-03-01", "2018-04-02"], "acceptanceDateTime": ["", ""],
+        "accessionNumber": ["0001-18-1", "0001-18-2"], "primaryDocument": ["s3.htm", "f4old.xml"]}
+_pages = []
+def _fake_get(url, timeout=15):
+    _pages.append(url)
+    if "history.json" in url:
+        return json.dumps(_old)
+    return json.dumps({"filings": {"recent": _recent, "files": [
+        {"name": "history.json", "filingFrom": "2017-01-01", "filingTo": "2018-12-31"},
+        {"name": "ancient.json", "filingFrom": "2000-01-01", "filingTo": "2001-12-31"}]}})
+with unittest.mock.patch.dict(edgar._cik_map, {"XYZ": "0000000001"}), unittest.mock.patch.object(edgar, "_get", side_effect=_fake_get):
+    _fb = edgar.filings_between("XYZ", edgar.DILUTIVE_FORMS, "2018-01-01", "2020-12-31")
+    check("filings_between follows older history pages that overlap, skips ones that don't, sorts oldest-first",
+          [f["form"] for f in _fb] == ["S-3", "424B5"] and not any("ancient" in u for u in _pages) and any("history" in u for u in _pages))
+    _pages.clear()
+    check("filings_between only fetches history when the range needs it",
+          [f["form"] for f in edgar.filings_between("XYZ", {"424B5"}, "2020-06-01", "2020-06-30")] == ["424B5"]
+          and not any("history" in u for u in _pages))
+    check("filings_between unknown ticker -> []", edgar.filings_between("NOPE", {"4"}, "2020-01-01", "2020-12-31") == [])
+_fetched = []
+def _fake_get4(url, timeout=15):
+    if "/submissions/" in url:
+        return _fake_get(url, timeout)
+    _fetched.append(url)
+    return _FORM4_XML
+with unittest.mock.patch.dict(edgar._cik_map, {"XYZ": "0000000001"}), unittest.mock.patch.object(edgar, "_get", side_effect=_fake_get4):
+    _f4 = edgar.form4_transactions_between("XYZ", "2020-06-01", "2020-06-30")
+    check("form4_transactions_between fetches the RAW xml and returns evaluate()-ready transactions",
+          _fetched and "xslF345X05" not in _fetched[0] and _f4 and all(t["accepted"].startswith("2020-06-02") and "code" in t for t in _f4))
+    check("those transactions feed the production cross-check unchanged",
+          cc.evaluate({"signal": 0.3, "award_date": "2020-06-02"}, [], _f4, D(2020, 6, 2)) is not None)
+with unittest.mock.patch.dict(edgar._cik_map, {"XYZ": "0000000001"}), unittest.mock.patch.object(edgar, "_get", side_effect=OSError("down")):
+    check("historical EDGAR helpers fail open", edgar.filings_between("XYZ", {"4"}, "2020-01-01", "2020-12-31") == []
+          and edgar.form4_transactions_between("XYZ", "2020-01-01", "2020-12-31") == []
+          and edgar.shares_outstanding_asof("XYZ", "2020-06-01") is None)
 
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")

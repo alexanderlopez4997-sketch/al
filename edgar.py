@@ -455,6 +455,121 @@ def dilutive_filings(ticker, days=10, timeout=15):
     return sorted(out, key=lambda f: f["date"], reverse=True)
 
 
+# ================================================= historical (backtest) lookups ===
+# The functions above answer "what happened in the last few days". contract_backtest.py
+# needs the same facts for arbitrary past dates, strictly as they were PUBLIC then
+# (filing/acceptance dates, never period-end dates), so none of this leaks the future.
+
+def _submission_rows(block):
+    """One submissions-JSON block of parallel arrays -> list of per-filing dicts
+    {form, date, accepted, accession, doc}. Tolerates ragged/missing arrays."""
+    forms = block.get("form") or []
+    out = []
+    for i, f in enumerate(forms):
+        def col(k, default=""):
+            c = block.get(k) or []
+            return c[i] if i < len(c) else default
+        out.append({"form": f, "date": col("filingDate"), "accepted": col("acceptanceDateTime"),
+                    "accession": col("accessionNumber"), "doc": col("primaryDocument")})
+    return out
+
+
+def filings_between(ticker, forms, start, end, timeout=15):
+    """Filings of the given `forms` (a collection of form names) with filingDate in
+    [start, end] (ISO strings or dates), oldest first: [{form, date, accepted, url}].
+    Unlike recent_filings() this follows the submissions index's older-history pages
+    (`filings.files`), so it works years back. [] on any failure / unknown ticker."""
+    cik = _load_ciks().get(ticker.upper())
+    if not cik:
+        return []
+    start, end = str(start)[:10], str(end)[:10]
+    forms = set(forms)
+    try:
+        d = json.loads(_get(f"https://data.sec.gov/submissions/CIK{cik}.json", timeout))
+    except Exception:
+        return []
+    rows = _submission_rows(d.get("filings", {}).get("recent", {}))
+    for page in d.get("filings", {}).get("files", []) or []:
+        # Only fetch history pages that can overlap the requested range.
+        if (page.get("filingTo") or "9999") < start or (page.get("filingFrom") or "0000") > end:
+            continue
+        try:
+            rows += _submission_rows(json.loads(_get(f"https://data.sec.gov/submissions/{page['name']}", timeout)))
+        except Exception:
+            continue
+    out = []
+    for r in rows:
+        if r["form"] not in forms or not (start <= (r["date"] or "") <= end):
+            continue
+        a = (r["accession"] or "").replace("-", "")
+        url = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{a}/{r['doc']}"
+               if a and r["doc"] else "")
+        out.append({"form": r["form"], "date": r["date"], "accepted": r["accepted"], "url": url})
+    return sorted(out, key=lambda f: (f["date"], f["accepted"]))
+
+
+def _raw_form4_url(url):
+    """EDGAR lists a Form 4's primaryDocument under an XSL-rendering folder
+    (.../xslF345X05/form4.xml), which serves an HTML view; the machine-readable XML
+    sits one level up at .../form4.xml. Strip that folder; other URLs pass through."""
+    return re.sub(r"/xsl[^/]+/([^/]+)$", r"/\1", url or "")
+
+
+def form4_transactions_between(ticker, start, end, max_filings=40, timeout=15):
+    """Open-market Form 4 transactions filed in [start, end], oldest first, in the
+    shape form4_insider_bias()["transactions"] uses (code, usd, owner, title,
+    is_10b5_1, ... plus `accepted`), so contract_crosscheck.evaluate() consumes them
+    directly. `accepted` is the SEC acceptance time -- when the trade became public --
+    not the trade date. [] on any failure; a filing that fails to fetch is skipped."""
+    out = []
+    for f in filings_between(ticker, {"4"}, start, end, timeout)[:max_filings]:
+        if not f["url"]:
+            continue
+        try:
+            txs = parse_form4_xml(_get(_raw_form4_url(f["url"]), timeout))
+        except Exception:
+            continue
+        for tx in txs:
+            if tx.get("usd", 0) > 0:
+                out.append({**tx, "accepted": f["accepted"] or f["date"], "url": f["url"]})
+    return out
+
+
+def _shares_from_companyfacts(facts, asof):
+    """Shares outstanding as publicly reported on or before `asof` (a date/ISO string),
+    from an XBRL companyfacts JSON. Uses the cover-page figure (dei) and falls back to
+    the balance-sheet one; chooses by FILING date so a later restatement can't leak in.
+    Multiple share classes filed together are summed. None if nothing qualifies."""
+    asof = str(asof)[:10]
+    for taxonomy, concept in (("dei", "EntityCommonStockSharesOutstanding"),
+                              ("us-gaap", "CommonStockSharesOutstanding")):
+        try:
+            entries = facts["facts"][taxonomy][concept]["units"]["shares"]
+        except (KeyError, TypeError):
+            continue
+        ok = [e for e in entries if e.get("filed") and e["filed"] <= asof and e.get("val")]
+        if not ok:
+            continue
+        latest = max((e["filed"], e.get("end", "")) for e in ok)
+        # one filing can list several share classes; sum their distinct values
+        total = float(sum({e["val"] for e in ok if (e["filed"], e.get("end", "")) == latest}))
+        return total if total > 0 else None
+    return None
+
+
+def shares_outstanding_asof(ticker, asof, timeout=30):
+    """Point-in-time shares outstanding for `ticker` as of `asof`, from SEC XBRL
+    companyfacts. None on any failure or if no filing predates `asof`."""
+    cik = _load_ciks().get(ticker.upper())
+    if not cik:
+        return None
+    try:
+        return _shares_from_companyfacts(
+            json.loads(_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json", timeout)), asof)
+    except Exception:
+        return None
+
+
 def recent_filings(ticker, days=4, timeout=15):
     """Material SEC filings for `ticker` in the last `days`, newest first. Each:
     {form, note, bias, date, accepted, after_hours, url}, plus for 8-K filings:
