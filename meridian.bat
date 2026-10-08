@@ -17,5 +17,7 @@ if errorlevel 1 (
     copy /y requirements.txt .venv\.requirements.installed >nul
 )
 
+rem Keep one login across launches: web_server.py writes a generated password to .env once.
+set MERIDIAN_SAVE_PASSWORD=1
 .venv\Scripts\python web_server.py %*
 pause

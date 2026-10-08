@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, urlparse
 import urllib.request
 import ssl
 
-from envfile import load_dotenv
+from envfile import load_dotenv, save_dotenv_var
 load_dotenv()                                   # populate os.environ from .env before the API-key
                                                  # constants below are read at import time
 
@@ -66,12 +66,21 @@ HOST = os.environ.get("MERIDIAN_WEB_HOST", "127.0.0.1")
 # HTTP Basic Auth — required before exposing this server beyond localhost, e.g.
 # via MERIDIAN_WEB_HOST=0.0.0.0 or an ngrok tunnel. Set MERIDIAN_USER /
 # MERIDIAN_PASSWORD in .env for fixed credentials; otherwise a random password
-# is generated per run and printed to the console at startup.
+# is generated per run and printed to the console at startup. The meridian.sh /
+# meridian.bat launchers set MERIDIAN_SAVE_PASSWORD=1, which writes the generated
+# password to .env so it stays the same on every launch.
 AUTH_USER = os.environ.get("MERIDIAN_USER", "admin")
 AUTH_PASSWORD = os.environ.get("MERIDIAN_PASSWORD")
 AUTH_PASSWORD_GENERATED = AUTH_PASSWORD is None
+AUTH_PASSWORD_SAVED = False
 if AUTH_PASSWORD is None:
     AUTH_PASSWORD = secrets.token_urlsafe(12)
+    if os.environ.get("MERIDIAN_SAVE_PASSWORD") == "1":
+        try:
+            save_dotenv_var("MERIDIAN_PASSWORD", AUTH_PASSWORD)
+            AUTH_PASSWORD_SAVED = True
+        except OSError:
+            pass          # read-only checkout: fall back to a per-run password
 
 # CORS — off by default (same-origin only). Set MERIDIAN_CORS_ORIGIN to the
 # origin your separate frontend runs on (e.g. http://localhost:5173) to let
@@ -1293,7 +1302,8 @@ def main():
         print("Note: reachable from your whole network — still gated by the Basic Auth login below. "
               "Set MERIDIAN_WEB_HOST=127.0.0.1 to disable network access.")
     print(f"Basic auth — user: {AUTH_USER}  password: {AUTH_PASSWORD}"
-          + ("  (generated — set MERIDIAN_USER/MERIDIAN_PASSWORD in .env to pin it)"
+          + ("  (saved to .env — the same on every launch)" if AUTH_PASSWORD_SAVED else
+             "  (generated — set MERIDIAN_USER/MERIDIAN_PASSWORD in .env to pin it)"
              if AUTH_PASSWORD_GENERATED else ""))
     threading.Timer(0.8, lambda: webbrowser.open(local_url)).start()
     try:

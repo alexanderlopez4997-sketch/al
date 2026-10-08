@@ -20,4 +20,6 @@ if ! cmp -s requirements.txt .venv/.requirements.installed; then
     cp requirements.txt .venv/.requirements.installed
 fi
 
+# Keep one login across launches: web_server.py writes a generated password to .env once.
+export MERIDIAN_SAVE_PASSWORD=1
 exec .venv/bin/python web_server.py "$@"

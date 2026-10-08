@@ -2040,6 +2040,20 @@ check("a URL with no XSL folder is fetched once, unchanged", len(_c) == 1 and _c
 with unittest.mock.patch.object(edgar, "_get_bytes", side_effect=_fake_edgar([], xsl_serves="404", raw_serves="404")):
     check("both locations failing still degrades to None, never raises", edgar._parse_form4(_XSL_URL) is None)
 
+# --------------------------------------------------- .env password save ------
+import envfile
+with tempfile.TemporaryDirectory() as _d:
+    _p = os.path.join(_d, ".env")
+    envfile.save_dotenv_var("MERIDIAN_PASSWORD", "pw1", _p)
+    check("save creates .env owner-only", open(_p).read() == "MERIDIAN_PASSWORD=pw1\n" and (os.stat(_p).st_mode & 0o777) == 0o600)
+    with open(_p, "w") as _f:
+        _f.write("FINNHUB_KEY=abc")                    # no trailing newline
+    envfile.save_dotenv_var("MERIDIAN_PASSWORD", "pw2", _p)
+    check("save appends on its own line, keeps existing keys", open(_p).read() == "FINNHUB_KEY=abc\nMERIDIAN_PASSWORD=pw2\n")
+    os.environ.pop("MERIDIAN_PASSWORD", None)
+    envfile.load_dotenv(_p)
+    check("saved password round-trips through load_dotenv", os.environ.pop("MERIDIAN_PASSWORD", None) == "pw2")
+
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")
 print(f"RESULTS: {_PASS} passed, {_FAIL} failed")

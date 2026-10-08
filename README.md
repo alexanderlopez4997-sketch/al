@@ -42,7 +42,9 @@ python3 quant_engine.py --positions                  # Show all
 ```
 
 The launcher creates `.venv` and installs `requirements.txt` on first run, then
-starts the server and opens your browser. Or run it directly with
+starts the server and opens your browser. The first launch generates a login
+password and saves it to `.env` (git-ignored, owner-only), so it stays the same
+afterwards; set `MERIDIAN_USER` / `MERIDIAN_PASSWORD` there to choose your own. Or run it directly with
 `python3 web_server.py`.
 
 For a desktop icon, run `python3 install_shortcut.py` once (`--remove` undoes it): a
