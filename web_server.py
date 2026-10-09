@@ -52,6 +52,7 @@ import websocket_client_v2 as wsc
 import aapl_dashboard as ad
 import confirmation as cf
 import contract_crosscheck
+import market_dashboard as md
 import contracts
 import dod_scraper
 
@@ -81,9 +82,9 @@ if AUTH_PASSWORD is None:
 # inputs back in their output.
 CORS_ORIGIN = os.environ.get("MERIDIAN_CORS_ORIGIN", "")
 
-TAG = {"txt": "#C9D6E2", "dim": "#6B7E92", "buy": "#2ECC8F", "sell": "#FF5449",
-       "warn": "#E0A83B", "head": "#E8EEF5", "big": "#FFFFFF", "gold": "#C8A24B",
-       "formula": "#E8D9A8", "blue": "#4F9DE0"}
+TAG = {"txt": "#FF8C00", "dim": "#D97A00", "buy": "#4ADE80", "sell": "#FF6B5E",
+       "warn": "#FFB347", "head": "#FFA630", "big": "#FFA630", "gold": "#FFB347",
+       "formula": "#FFB347", "blue": "#D97A00"}
 
 WATCHLIST_CATEGORIES = {
     "high_beta": {
@@ -124,7 +125,7 @@ def _try(fn, d=None):
 def _seg_html(segs):
     out = []
     for text, tag in segs:
-        c = TAG.get(tag, "#C9D6E2")
+        c = TAG.get(tag, "#FF8C00")
         w = "700" if tag in ("head", "big", "gold") else "400"
         sz = "1.5em" if tag == "big" else "1.08em" if tag in ("head", "gold") else "1em"
         out.append(f'<span style="color:{c};font-weight:{w};font-size:{sz}">{_html.escape(text)}</span>')
@@ -173,7 +174,7 @@ def _research_html(res, filings, demo):
     def row(label, val):
         return f'<div class="corr-row"><div class="corr-label">{label}</div><div class="corr-value">{val}</div></div>'
 
-    h += '<h3 style="color:#C8A24B">Valuation</h3><div class="corr-table">'
+    h += '<h3 style="color:var(--gold)">Valuation</h3><div class="corr-table">'
     h += row("Market cap", _fmt_big(res["market_cap"]))
     h += row("P/E (trailing / fwd)", f'{_fmt_ratio(res["pe"])} / {_fmt_ratio(res["forward_pe"])}')
     h += row("PEG", _fmt_ratio(res["peg"]))
@@ -183,7 +184,7 @@ def _research_html(res, filings, demo):
     h += row("Analyst target", _fmt_ratio(res["analyst_target"]))
     h += '</div>'
 
-    h += '<h3 style="color:#C8A24B">Profitability & earnings quality</h3><div class="corr-table">'
+    h += '<h3 style="color:var(--gold)">Profitability & earnings quality</h3><div class="corr-table">'
     h += row("Profit margin · operating margin", f'{_fmt_pct(res["profit_margin"])} · {_fmt_pct(res["operating_margin"])}')
     h += row("ROE · ROA", f'{_fmt_pct(res["roe"])} · {_fmt_pct(res["roa"])}')
     h += row("Revenue (TTM)", _fmt_big(res["revenue_ttm"]))
@@ -196,13 +197,13 @@ def _research_html(res, filings, demo):
     h += row("FCF vs net income", f'<span style="color:{gap_color}">{_fmt_pct(gap)}</span>{gap_note}' if gap is not None else "—")
     h += '</div>'
 
-    h += '<h3 style="color:#C8A24B">Other</h3><div class="corr-table">'
+    h += '<h3 style="color:var(--gold)">Other</h3><div class="corr-table">'
     h += row("Dividend yield", _fmt_pct(res["dividend_yield"]))
     h += row("Beta", _fmt_ratio(res["beta"]))
     h += '</div>'
 
     if filings:
-        h += '<h3 style="color:#C8A24B">Primary sources</h3>'
+        h += '<h3 style="color:var(--gold)">Primary sources</h3>'
         names = {"10-K": "Annual report (10-K)", "10-Q": "Latest quarterly report (10-Q)",
                  "DEF 14A": "Proxy statement — exec pay & governance (DEF 14A)"}
         for form, info in filings.items():
@@ -293,7 +294,7 @@ def _full_analyze(sym, demo, optimize=False):
             "research_html": _research_html(res.get("research"), res.get("primary_filings") or {}, demo)}
 
 
-_CONFIRM_COLOR = {"verified": "#2ECC8F", "partial": "#E0A83B", "weak": "#6B7E92", "kill": "#FF5449"}
+_CONFIRM_COLOR = {"verified": "var(--buy)", "partial": "var(--amber)", "weak": "var(--dim)", "kill": "var(--sell)"}
 
 
 def _confirmation_html(res):
@@ -307,8 +308,8 @@ def _confirmation_html(res):
         return ""
     if cs["level"] == "none":
         return ""
-    col = _CONFIRM_COLOR.get(cs["level"], "#6B7E92")
-    kills = "".join(f'<div class="sub" style="color:#FF5449">🔴 {_html.escape(lbl)} — {_html.escape(str(det))}</div>'
+    col = _CONFIRM_COLOR.get(cs["level"], "var(--dim)")
+    kills = "".join(f'<div class="sub" style="color:var(--sell)">🔴 {_html.escape(lbl)} — {_html.escape(str(det))}</div>'
                     for lbl, det in cs["kills"])
     return (f'<div class="card" style="border-left:4px solid {col}">'
             f'<b style="color:{col};font-size:1.1em">{_html.escape(cs["headline"])}</b>'
@@ -367,9 +368,24 @@ def _watchlist(tickers, demo):
         out.append({"ticker": t, "last": round(r["last"], 2), "chg": round(r["chg"], 2),
                     "score": round(r["score"]), "tone": r["verdict"]["tone"], "verdict": r["verdict"]["label"],
                     "whale": ("↑" if w and w["whale"] and w["direction"] == "accumulation"
-                              else "↓" if w and w["whale"] and w["direction"] == "distribution" else "")})
+                              else "↓" if w and w["whale"] and w["direction"] == "distribution" else ""),
+                    "rvol": round(float(df["Volume"].iloc[-1] / (df["Volume"].tail(21).head(20).mean() or 1)), 2),
+                    "spark": md.price_spark_svg(df["Close"].tail(30).values, up=r["chg"] >= 0)})
     out.sort(key=lambda x: -x["score"])
     return out
+
+
+def _dashboard(tickers, demo):
+    """Everything the Dashboard tab shows besides the EDGAR/contract panels,
+    built from ONE watchlist fetch (the benchmark strip is the only other
+    download) so a 30s refresh costs two batches, not one per widget."""
+    rows = _watchlist(tickers, demo)
+    return {"watchlist": rows,
+            "market": _try(lambda: md.market_overview(demo), {"indices": []}),
+            "sectors": md.sector_rotation(rows)["sectors"],
+            "movers": md.top_movers(rows),
+            "summary": md.signal_summary(rows),
+            "health": md.system_health()["checks"]}
 
 
 # ------------------------------------------------------------- afterhours ---
@@ -745,7 +761,7 @@ def _morning_html(tickers, demo):
             return f'<h3 style="color:{color}">{title}</h3><div class="muted">(none)</div>'
         h = f'<h3 style="color:{color}">{title}</h3>'
         for b in items:
-            rs = "".join(f'<div class="sub" style="color:{"#2ECC8F" if d>0 else "#FF5449" if d<0 else "#6B7E92"}">'
+            rs = "".join(f'<div class="sub" style="color:{"var(--buy)" if d>0 else "var(--sell)" if d<0 else "var(--dim)"}">'
                          f'{"▲" if d>0 else "▼" if d<0 else "•"} {_html.escape(x)}</div>' for x, d in b["reasons"][:4])
             h += (f'<div class="ohcard"><div class="ohh"><b>{b["ticker"]}</b>'
                   f'<span class="tagpill">catalyst {b["score"]:+d}</span></div>'
@@ -754,8 +770,8 @@ def _morning_html(tickers, demo):
     buys = [b for b in ranked if b["verdict"] == "BUY candidate"]
     risks = [b for b in ranked if b["verdict"] == "RISK / avoid"]
     return {"html": '<div class="grid2col">'
-            + '<div>' + block("🟢 BUY CANDIDATES", buys, "#2ECC8F") + '</div>'
-            + '<div>' + block("🔴 RISK / AVOID", risks, "#FF5449") + '</div></div>'}
+            + '<div>' + block("🟢 BUY CANDIDATES", buys, "var(--buy)") + '</div>'
+            + '<div>' + block("🔴 RISK / AVOID", risks, "var(--sell)") + '</div></div>'}
 
 
 # ------------------------------------------------------------- recent news ---
@@ -771,7 +787,7 @@ def _recent_news_html(tickers, demo):
         rows = ""
         for item in demo_news:
             sig = item.get("signal", 0)
-            sig_color = "#2ECC8F" if sig > 0.2 else "#FF5449" if sig < -0.2 else "#E0A83B"
+            sig_color = "var(--buy)" if sig > 0.2 else "var(--sell)" if sig < -0.2 else "var(--amber)"
             tag = "POSITIVE" if sig > 0.2 else "NEGATIVE" if sig < -0.2 else "NEUTRAL"
             defensive = " · ⚠ DEFENSIVE SHIFT" if item.get("defensive_shift") else ""
             detail = item.get("detail", f"{item.get('n', 0)} articles")
@@ -805,7 +821,7 @@ def _recent_news_html(tickers, demo):
     for item in news_items[:8]:  # Show top 8
         sig = item.get("signal", 0)
         conf = item.get("confidence", 0)
-        sig_color = "#2ECC8F" if sig > 0.2 else "#FF5449" if sig < -0.2 else "#E0A83B"
+        sig_color = "var(--buy)" if sig > 0.2 else "var(--sell)" if sig < -0.2 else "var(--amber)"
         tag = "POSITIVE" if sig > 0.2 else "NEGATIVE" if sig < -0.2 else "NEUTRAL"
         defensive = " · ⚠ DEFENSIVE SHIFT" if item.get("defensive_shift") else ""
         detail = item.get("detail", f"{item.get('n', 0)} articles")
@@ -825,10 +841,10 @@ def _dod_value_note(award):
     face, counted = award.get("value_usd", 0) or 0, dod_scraper.award_counted_usd(award)
     if award.get("value_kind") == "ceiling":
         how = ("obligated" if award.get("obligated_usd") is not None else "counted, none reported funded")
-        return (f' · <span style="color:#E0A83B">CEILING</span>'
-                f' <span style="color:#9B9FAE">{_fmt_usd_k(counted)} {how}</span>')
+        return (f' · <span style="color:var(--amber)">CEILING</span>'
+                f' <span style="color:var(--dim)">{_fmt_usd_k(counted)} {how}</span>')
     if face and counted < face * 0.99:
-        return f' <span style="color:#9B9FAE">· {_fmt_usd_k(counted)} obligated at award</span>'
+        return f' <span style="color:var(--dim)">· {_fmt_usd_k(counted)} obligated at award</span>'
     return ""
 
 
@@ -874,28 +890,28 @@ def _dod_awards_html(demo):
         desc = award.get("description", "Contract award")
         date_str = award.get("date", "today")
         sentiment = award.get("sentiment", "neutral")
-        sentiment_color = "#2ECC8F" if sentiment == "bullish" else "#FF5449" if sentiment == "bearish" else "#E0A83B"
+        sentiment_color = "var(--buy)" if sentiment == "bullish" else "var(--sell)" if sentiment == "bearish" else "var(--amber)"
         signal = award.get("signal")
         conf = award.get("confidence")
-        score_txt = (f'🎯 signal <span style="color:#B15CDE">{signal:+.2f}</span> · confidence {conf:.0%}'
+        score_txt = (f'🎯 signal <span style="color:var(--ct)">{signal:+.2f}</span> · confidence {conf:.0%}'
                      if signal is not None and conf is not None else "🎯 signal n/a (no ticker/market cap)")
 
-        rows += (f'<div class="ohcard" style="border-left:3px solid #B15CDE">'
+        rows += (f'<div class="ohcard" style="border-left:3px solid var(--ct)">'
                 f'<div class="ohh">'
-                f'<b style="color:#B15CDE">{_html.escape(ticker)}</b> <span style="color:#9B4BCC">·</span> <span style="color:#A8D8EA">{_html.escape(contractor)}</span>'
+                f'<b style="color:var(--ct)">{_html.escape(ticker)}</b> <span style="color:var(--ct-dim)">·</span> <span style="color:var(--ct)">{_html.escape(contractor)}</span>'
                 f'<span class="tagpill" style="color:{sentiment_color};background:rgba({sentiment_color.lstrip("#")},0.1);">{sentiment.upper()}</span>'
                 f'</div>'
-                f'<div class="sub" style="color:#B8C5D6">{_fmt_usd_k(value)}{_dod_value_note(award)} · {_html.escape(desc)}</div>'
-                f'<div class="stat" style="margin-top:8px;font-size:12px;color:#9B9FAE">'
+                f'<div class="sub" style="color:var(--txt)">{_fmt_usd_k(value)}{_dod_value_note(award)} · {_html.escape(desc)}</div>'
+                f'<div class="stat" style="margin-top:8px;font-size:12px;color:var(--dim)">'
                 f'📅 {date_str} · {score_txt}'
                 f'</div></div>')
 
     summary = (f'{len(awards)} award{"s" if len(awards) != 1 else ""} · {_fmt_usd_k(total_value)} announced'
                + (f' · {_fmt_usd_k(total_counted)} counted toward signals' if abs(total_counted - total_value) > 1 else ''))
-    return {"html": f'<div class="stat" style="color:#B15CDE;font-weight:700">⚔️ DoD Contract Intelligence</div>'
-            f'<div class="stat" style="color:#A8D8EA;font-size:14px;margin-bottom:16px">{summary}</div>'
+    return {"html": f'<div class="stat" style="color:var(--ct);font-weight:700">⚔️ DoD Contract Intelligence</div>'
+            f'<div class="stat" style="color:var(--ct);font-size:14px;margin-bottom:16px">{summary}</div>'
             f'<div class="grid3" style="margin-top:12px">{rows}</div>'
-            + '<div class="muted" style="margin-top:16px;color:#8B95A8;font-size:13px">Real-time defense.gov contract awards, scored by '
+            + '<div class="muted" style="margin-top:16px;color:var(--dim);font-size:13px">Real-time defense.gov contract awards, scored by '
               'contractor market cap. Sentiment reflects 1-day news coverage.</div>'}
 
 
@@ -950,15 +966,15 @@ def _gov_contracts_html(tickers, demo):
     rows = ""
     for c in cards:
         sig = c["signal"]
-        sig_txt = f'<span class="tagpill" style="color:#B15CDE">signal {sig:+.2f}</span>' if sig is not None \
+        sig_txt = f'<span class="tagpill" style="color:var(--ct)">signal {sig:+.2f}</span>' if sig is not None \
             else f'<span class="tagpill">{c["src"]}</span>'
         n_txt = f' · {c["n"]} awards' if c["n"] > 1 else ""
-        rows += (f'<div class="ohcard" style="border-left:3px solid #B15CDE">'
-                 f'<div class="ohh"><span><b style="color:#B15CDE">{_html.escape(c["ticker"])}</b> '
-                 f'<span style="color:#A8D8EA">{_html.escape(str(c["agency"]))}</span></span>{sig_txt}</div>'
-                 f'<div class="sub" style="color:#B8C5D6">{_fmt_usd_k(c["value"])}{n_txt}'
+        rows += (f'<div class="ohcard" style="border-left:3px solid var(--ct)">'
+                 f'<div class="ohh"><span><b style="color:var(--ct)">{_html.escape(c["ticker"])}</b> '
+                 f'<span style="color:var(--ct)">{_html.escape(str(c["agency"]))}</span></span>{sig_txt}</div>'
+                 f'<div class="sub" style="color:var(--txt)">{_fmt_usd_k(c["value"])}{n_txt}'
                  f'{" · " + _html.escape(c["description"]) if c["description"] else ""}</div>'
-                 f'<div class="sub" style="color:#9B9FAE">📅 {_html.escape(str(c["date"]))}</div></div>')
+                 f'<div class="sub" style="color:var(--dim)">📅 {_html.escape(str(c["date"]))}</div></div>')
     return {"html": rows}
 
 
@@ -972,15 +988,15 @@ def _trackrecord_html():
     if not summ["graded"]:
         return {"html": h + '<div class="muted" style="margin-top:12px">Nothing graded yet — '
                 'verdicts age 5 trading days before scoring. Run live scans over a few days.</div>'}
-    h += '<h3 style="color:#C8A24B">By verdict</h3>'
+    h += '<h3 style="color:var(--gold)">By verdict</h3>'
     for name, s in summ["by_tone"].items():
-        col = "#2ECC8F" if s["hit_rate"] >= .5 else "#FF5449"
+        col = "var(--buy)" if s["hit_rate"] >= .5 else "var(--sell)"
         h += (f'<div class="ohcard"><b>{name}</b> — {s["n"]} calls · '
               f'<b style="color:{col}">{s["hit_rate"]*100:.0f}% correct</b> · avg {s["avg_fwd"]*100:+.1f}%</div>')
     if summ["by_tag"]:
-        h += '<h3 style="color:#C8A24B">Which signals add edge</h3>'
+        h += '<h3 style="color:var(--gold)">Which signals add edge</h3>'
         for t, s in sorted(summ["by_tag"].items(), key=lambda kv: -kv[1]["hit_rate"]):
-            col = "#2ECC8F" if s["hit_rate"] >= .5 else "#FF5449"
+            col = "var(--buy)" if s["hit_rate"] >= .5 else "var(--sell)"
             h += (f'<div class="ohcard">{t} — {s["n"]} · '
                   f'<b style="color:{col}">{s["hit_rate"]*100:.0f}%</b> · avg {s["avg_fwd"]*100:+.1f}%</div>')
     return {"html": h}
@@ -1018,7 +1034,7 @@ _MANIFEST = {
     "name": "Meridian Terminal", "short_name": "Meridian",
     "description": "Quant engine dashboard: watchlist, analysis, screener and signals.",
     "start_url": "/", "scope": "/", "display": "standalone",
-    "background_color": "#0A0E15", "theme_color": "#0A0E15",
+    "background_color": "#000000", "theme_color": "#000000",
     "icons": [
         {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png"},
         {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png"},
@@ -1030,7 +1046,7 @@ _MANIFEST = {
 # cache. The worker exists to make the app installable, and shows a short notice if the
 # server is unreachable instead of the browser's error page.
 _SERVICE_WORKER = """const OFFLINE = '<!DOCTYPE html><meta name="viewport" content="width=device-width,initial-scale=1">' +
-  '<body style="background:#0A0E15;color:#C9D6E2;font:16px system-ui;display:grid;place-items:center;height:100vh;margin:0">' +
+  '<body style="background:#000000;color:#FF8C00;font:16px system-ui;display:grid;place-items:center;height:100vh;margin:0">' +
   '<p>Meridian cannot reach its server. Start web_server.py and reload.</p>';
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
@@ -1146,6 +1162,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(json.dumps(_ohlc((g1("ticker", "NVDA") or "NVDA").upper(), demo)))
             if u.path == "/api/watchlist":
                 return self._send(json.dumps(_watchlist(tks, demo)))
+            if u.path == "/api/dashboard":
+                return self._send(json.dumps(_dashboard(tks, demo)))
             if u.path == "/api/afterhours":
                 return self._send(json.dumps(_afterhours_html(tks, demo)))
             if u.path == "/api/feed":
@@ -1305,40 +1323,283 @@ def main():
 _pill = lambda n, on: f'<span class="feed {"on" if on else "off"}">● {n}</span>'
 _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Meridian Terminal</title>
-<link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#0A0E15">
+<link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#000000">
 <link rel="icon" href="/static/icon-192.png"><link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Meridian">
 <script>if('serviceWorker' in navigator)addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}))</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
- :root{--bg:#0A0E15;--panel:#10161F;--panel2:#161F2B;--line:#232F3D;--txt:#C9D6E2;--dim:#6B7E92;
-   --gold:#C8A24B;--buy:#2ECC8F;--sell:#FF5449;--amber:#E0A83B;--blue:#4F9DE0;--purple:#B15CDE}
+ :root{--bg:#000000;--panel:#0b0b0b;--panel2:#0b0b0b;--panel3:#140c02;--line:#4a2a05;--line2:#7a4608;
+   --ct:#3EC9E0;--ct-dim:#2A9FB3;--txt:#FF8C00;--dim:#D97A00;--gold:#FFA630;--gold-dim:#D08A1A;--buy:#4ADE80;--sell:#FF6B5E;--amber:#FFC24D;
+   --go:#FF8C00;--buy-bg:#0d2a18;--hold-bg:#2a1f08;--avoid-bg:#2a0f0d;
+   --sans:'Atkinson Hyperlegible',Verdana,Arial,sans-serif;
+   --serif:'Atkinson Hyperlegible',Georgia,serif;
+   --mono:'JetBrains Mono','SF Mono',ui-monospace,Menlo,Consolas,monospace}
  *{box-sizing:border-box} html,body{margin:0;height:100%}
- body{background:var(--bg);color:var(--txt);font-family:-apple-system,"SF Pro Text",Inter,system-ui,sans-serif;
-   font-size:14px;display:flex;flex-direction:column;height:100vh}
- .top{display:flex;align-items:center;gap:14px;background:var(--panel);padding:10px 18px;border-bottom:2px solid var(--gold)}
- .diamond{color:var(--gold);font-size:22px}.brand{font-family:Georgia,serif;font-weight:700;font-size:20px;letter-spacing:1px}
- .sublabel{color:var(--gold);font-size:8px;letter-spacing:1px}.spacer{flex:1}
- .clock{font-family:ui-monospace,Menlo,monospace;font-weight:700}.pill{background:var(--panel2);color:var(--dim);padding:3px 10px;border-radius:3px;font-size:11px;letter-spacing:1px}
- .feeds{display:flex;gap:14px;background:var(--panel2);padding:5px 18px;border-bottom:1px solid var(--line);font-size:11px;letter-spacing:1px;align-items:center}
- .feed.on{color:var(--buy)}.feed.off{color:#3A4657}.lbl{color:var(--dim)}.stream{margin-left:auto;color:var(--buy)}
- .ctrl{display:flex;align-items:center;gap:8px;padding:10px 18px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
- input,button{font-family:inherit;font-size:14px;border-radius:5px;border:1px solid var(--line);outline:none}
- input{background:var(--panel2);color:var(--txt);padding:8px 12px}
- #tk{width:120px;text-transform:uppercase;font-family:ui-monospace,monospace;font-weight:700;letter-spacing:1px}
- #wl{width:340px;font-family:ui-monospace,monospace;font-size:12px}
- button{background:var(--buy);color:#04140c;font-weight:700;padding:8px 18px;cursor:pointer;border:none}
- button:hover{filter:brightness(1.1)}
- .tabs{display:flex;gap:4px}.tab{padding:8px 14px;background:transparent;color:var(--dim);border:none;border-radius:5px;cursor:pointer}
- .tab.active{background:var(--panel2);color:var(--gold)}.toggle{color:var(--dim);display:flex;align-items:center;gap:6px;cursor:pointer}
- .main{flex:1;overflow:auto;padding:18px}
- .hd{display:flex;align-items:baseline;gap:14px;margin-bottom:10px}.tk{font-size:30px;font-weight:800}
- .px{font-family:ui-monospace,monospace;font-size:18px}.badge{margin-left:auto;padding:6px 16px;border-radius:6px;font-weight:800;letter-spacing:1px}
- .good{background:#0f2f22;color:var(--buy);border:1px solid var(--buy)}.neutral{background:#2f2710;color:var(--amber);border:1px solid var(--amber)}.bad{background:#2f1414;color:var(--sell);border:1px solid var(--sell)}
- .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+ body{background:var(--bg);
+   color:var(--txt);font-family:var(--sans);
+   font-size:16px;display:flex;flex-direction:column;height:100vh;overflow-x:hidden}
+ .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;row-gap:6px;
+   background:var(--panel);
+   padding:10px 20px;position:relative;z-index:3}
+ .diamond{color:var(--gold);font-size:24px;font-weight:700;font-family:var(--serif)}
+ .brand{font-family:var(--serif);font-weight:700;font-size:14px;letter-spacing:0;color:var(--txt)}
+ .sublabel{color:var(--gold-dim);font-size:11px;letter-spacing:2px;text-transform:uppercase}.spacer{flex:1}
+ .clock{font-family:var(--mono);font-weight:600;letter-spacing:.3px;color:var(--dim);padding-left:14px;border-left:1px solid var(--line)}
+ .pill{background:var(--avoid-bg);color:var(--sell);padding:3px 10px;border-radius:0;font-size:12.5px;letter-spacing:1px;
+   border:1px solid var(--sell);font-weight:700;text-transform:uppercase}
+ .pill.good{background:var(--buy-bg);color:var(--buy);border-color:var(--buy)}
+ .feeds{display:flex;gap:16px;background:var(--panel3);padding:6px 20px;border-bottom:1px solid var(--line);
+   font-size:12.5px;letter-spacing:.7px;align-items:center;position:relative;z-index:2;flex-wrap:wrap;row-gap:4px;text-transform:uppercase}
+ .feed.on{color:var(--buy)}
+ .feed.off{color:var(--gold-dim)}.lbl{color:var(--dim);font-weight:700;letter-spacing:.09em;text-transform:uppercase;font-size:13px}
+ .stream{margin-left:auto;color:var(--buy);font-weight:700}
+ .top .feeds{flex:1 1 auto;min-width:0;background:none;border:none;padding:0 0 0 22px;margin-left:8px;border-left:1px solid var(--line)}
+ .ctrl{display:flex;align-items:center;gap:9px;padding:9px 20px;
+   background:var(--panel3);border-bottom:1px solid var(--line);flex-wrap:wrap}
+ input,button{font-family:inherit;font-size:16px;border-radius:0;border:1px solid var(--line2);outline:none}
+ input{background:var(--panel);color:var(--txt);padding:7px 10px}
+ input:focus{border-color:var(--gold)}
+ #tk{width:120px;text-transform:uppercase;font-family:var(--mono);font-weight:700;letter-spacing:1px}
+ #wl{width:340px;font-family:var(--mono);font-size:15px}
+ button{background:var(--go);color:#000000;font-weight:700;padding:7px 16px;font-family:var(--mono);letter-spacing:.04em;
+   cursor:pointer;border:1px solid var(--go)}
+ button:hover{filter:brightness(1.12)}
+ .heatgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);margin-bottom:18px}
+ .heatcell{background:var(--panel);padding:10px 8px;cursor:pointer;text-align:center;transition:filter .1s linear;color:var(--txt)}
+ .heatcell:hover{filter:brightness(.97)}
+ .hct{font-weight:800;font-size:16px;letter-spacing:.3px;font-family:var(--mono)}
+ .hcp{font-family:var(--mono);font-size:14px;margin-top:3px}
+ /* The tab strip wraps onto extra rows when it's wider than the space beside
+    the interval/Demo controls (always the case on a phone) -- no scrollbar. */
+ .tabs{display:flex;flex-wrap:wrap;flex:1 1 0;min-width:0;background:var(--panel);border-top:1px solid var(--line);border-left:1px solid var(--line);max-width:100%}
+ .tabs~.spacer{display:none}
+ .tab{padding:8px 14px;background:transparent;color:var(--dim);border:none;border-right:1px solid var(--line);border-bottom:1px solid var(--line);
+   border-radius:0;cursor:pointer;font-weight:600;flex:0 0 auto;font-size:15px;text-transform:uppercase;letter-spacing:.02em}
+ .tab:hover{color:var(--txt);background:var(--panel3)}
+ .tab.active{background:var(--panel3);color:var(--gold)}
+ .tabnum{font-family:var(--mono);font-size:11px;color:var(--gold-dim);margin-right:6px;font-weight:700}
+ .tab.active .tabnum{color:var(--gold)}
+ .ivbtn{padding:5px 9px;background:var(--panel);color:var(--dim);border:1px solid var(--line);
+   border-radius:0;cursor:pointer;font-weight:600;font-size:15px;font-family:var(--mono)}
+ .ivbtn:hover{color:var(--txt);background:var(--panel3)}
+ .ivbtn.active{background:var(--panel3);color:var(--gold);border-color:var(--gold)}
+ .toggle{color:var(--dim);display:flex;align-items:center;gap:6px;cursor:pointer;font-family:var(--mono);font-size:14px;letter-spacing:.04em;text-transform:uppercase}
+ input[type=checkbox]{accent-color:var(--gold);width:14px;height:14px}
+ .main{flex:1;overflow:auto;padding:20px}
+ .hd{display:flex;align-items:baseline;gap:14px;margin-bottom:14px}
+ .tk{font-size:32.5px;font-weight:800;letter-spacing:.2px;font-family:var(--mono)}
+ .px{font-family:var(--mono);font-size:20px}
+ .badge{margin-left:auto;padding:6px 16px;border-radius:0;font-weight:800;letter-spacing:1px;font-size:15px}
+ .good{background:var(--buy-bg);color:var(--buy);border:1px solid var(--buy)}
+ .neutral{background:var(--hold-bg);color:var(--amber);border:1px solid var(--amber)}
+ .bad{background:var(--avoid-bg);color:var(--sell);border:1px solid var(--sell)}
+ .card{background:var(--panel2);border:1px solid var(--line);border-radius:0;padding:16px;margin-bottom:14px}
+ #chart{height:min(72vh,680px);min-height:440px}
+ .chartwrap{position:relative}
+ .ohlclegend{position:absolute;top:8px;left:8px;z-index:2;font-size:14px;letter-spacing:.3px;font-family:var(--mono);
+   background:rgba(0,0,0,.85);border:1px solid var(--line);padding:4px 8px;pointer-events:none;line-height:1.6}
+ #entrysignal{position:absolute;top:34px;left:8px;z-index:2;pointer-events:none;text-align:left;max-width:70%}
+ .ohlclegend b{color:var(--dim);font-weight:600;margin-right:3px}
+ .ohlclegend span{margin-right:10px}
+ .report{white-space:pre-wrap;font-family:var(--sans);line-height:1.55;font-size:16px}
+ .muted{color:var(--dim)}.loader{color:var(--gold)}
+ #wlnote,.newsfeed.muted,.ctscroll.muted,.ctscroll>.muted:only-child{font-family:var(--mono);font-size:14px}
+ .ctscroll.muted,.ctscroll>.muted:only-child{border:1px solid var(--line);background:var(--panel);padding:9px 14px}
+ iframe{width:100%;height:80vh;border:1px solid var(--line);border-radius:0;background:#000}
+ .wgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+ .tile{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--line);
+   border-radius:0;padding:13px;cursor:pointer;transition:border-color .1s linear}
+ .tile:hover{border-color:var(--gold)}
+ .tile.g{border-left-color:var(--buy)}.tile.b{border-left-color:var(--sell)}.tile.n{border-left-color:var(--amber)}
+ .tile .t{font-size:20px;font-weight:800;letter-spacing:.2px;font-family:var(--mono)}.tile .p{font-family:var(--mono);margin:5px 0}
+ .tile .v{font-size:14px;letter-spacing:.3px}.tile .sc{float:right;font-family:var(--mono);font-weight:800}
+ .tilespark{margin:6px 0}.rvol{font-size:12.5px;color:var(--dim);margin-top:4px;letter-spacing:.3px;font-family:var(--mono)}
+ .mkstrip{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:0;margin-bottom:14px;border:1px solid var(--line);background:var(--panel)}
+ .mkcard{border-right:1px solid var(--line);padding:11px 15px}
+ .mkname{font-size:12px;color:var(--dim);letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px;font-weight:700}
+ .mkrow{display:flex;align-items:baseline;gap:8px;font-family:var(--mono);font-size:15px}
+ .mkrow b{font-size:19px;color:var(--txt)}.mkpx{font-weight:700}
+ .mkspark{margin-top:6px}
+ .breadth{display:flex;align-items:center;gap:14px;margin-bottom:14px;padding:0 2px}
+ .breadthbar{flex:0 0 200px;height:6px;border-radius:0;background:var(--avoid-bg);overflow:hidden;border:1px solid var(--line)}
+ .breadthfill{height:100%;background:var(--buy);transition:width .3s linear}
+ .breadthtext{font-size:15px;color:var(--dim);font-family:var(--mono)}
+ .grid3{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+ .grid2col{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+ .ohcard{background:var(--panel2);border:1px solid var(--line);border-radius:0;padding:12px;margin-bottom:10px;
+   transition:border-color .1s linear}
+ .ohcard:hover{border-color:var(--gold)}
+ .ohh{display:flex;justify-content:space-between;margin-bottom:6px}.tagpill{font-size:14px;color:var(--amber)}
+ .sub{font-size:15px;color:var(--dim);margin-top:3px}.sub a{color:var(--gold)}.stat{font-family:var(--mono)}
+ h3{font-size:13px;letter-spacing:.12em;margin:16px 0 8px;color:var(--gold);text-transform:uppercase;font-weight:700;
+   display:flex;align-items:center;gap:8px}
+ h3::after{content:"";flex:1;height:1px;background:var(--line)}
+ .fcode{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--gold);border:1px solid var(--gold);
+   padding:1px 6px;letter-spacing:.04em;background:var(--panel);text-transform:uppercase}
+ ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-track{background:var(--panel3)}
+ ::-webkit-scrollbar-thumb{background:var(--line2);border-radius:0;border:2px solid var(--panel3)}
+ ::-webkit-scrollbar-thumb:hover{background:var(--gold-dim)}
+ ::-webkit-scrollbar-corner{background:var(--panel3)}
+ .sectorrotation{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0;margin-bottom:14px;border:1px solid var(--line);background:var(--panel)}
+ .sectcard{border-right:1px solid var(--line);padding:11px 13px;cursor:pointer;transition:background .1s linear}
+ .sectcard:hover{background:var(--panel3)}
+ .sectname{font-size:12.5px;color:var(--dim);letter-spacing:.06em;text-transform:uppercase;margin-bottom:7px;font-weight:700}
+ .sectprf{font-size:19px;font-weight:800;margin-bottom:4px;font-family:var(--mono)}
+ .sectmom{font-size:14px;color:var(--amber);margin-bottom:4px;font-family:var(--mono)}
+ .sectrats{font-size:12.5px;color:var(--dim);display:flex;gap:8px;font-family:var(--mono)}
+ .topmovers{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-bottom:14px;border:1px solid var(--line)}
+ .movgroup{background:var(--panel2);padding:12px;border-right:1px solid var(--line)}
+ .movgroup:last-child{border-right:none}
+ .movhead{font-size:12.5px;color:var(--dim);letter-spacing:.08em;text-transform:uppercase;margin-bottom:10px;font-weight:700}
+ .movrow{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font-size:15px}
+ .movrow:last-child{border-bottom:none}
+ .movticker{font-weight:700;color:var(--txt);font-family:var(--mono)}
+ .movchg{font-weight:700;margin:0 6px;font-family:var(--mono)}
+ .movscore{font-size:14px;color:var(--amber);font-family:var(--mono)}
+ .sigsumstats{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-bottom:14px;border:1px solid var(--line);background:var(--panel)}
+ .sigstat{border-right:1px solid var(--line);padding:12px;text-align:left}
+ .sigstat:last-child{border-right:none}
+ .sigval{font-size:24px;font-weight:800;color:var(--txt);margin-bottom:4px;font-family:var(--mono)}
+ .siglabel{font-size:12px;color:var(--dim);letter-spacing:.09em;text-transform:uppercase;font-weight:700}
+ .riskbanner{border-left:4px solid var(--buy);background:var(--panel2);border-top:1px solid var(--line);
+   border-right:1px solid var(--line);border-bottom:1px solid var(--line);padding:10px 14px;margin-bottom:14px;
+   display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+ .riskbanner.halt{border-left-color:var(--sell)}
+ .riskstats{display:flex;gap:18px;flex-wrap:wrap;font-family:var(--mono);font-size:14.5px;color:var(--dim)}
+ .riskstats b{color:var(--txt)}
+ .healthstrip{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+ .healthchip{display:flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--panel2);
+   padding:6px 10px;font-size:13px;color:var(--dim);font-family:var(--mono)}
+ .healthdot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+ .healthdot.ok{background:var(--buy)}.healthdot.warn{background:var(--amber)}
+ .healthdot.stale{background:var(--sell)}.healthdot.missing{background:transparent;box-shadow:inset 0 0 0 1.5px var(--dim)}
+ .healthchip.missing{color:var(--dim);opacity:.75}
+ .newsfeed{border:1px solid var(--line);background:var(--panel);margin-bottom:14px}
+ .newsitem{display:flex;gap:10px;align-items:baseline;padding:9px 14px;border-bottom:1px solid var(--line);font-size:15px}
+ .newsitem:last-child{border-bottom:none}
+ .newsitem:hover{background:var(--panel3)}
+ .newstk{font-family:var(--mono);font-weight:800;color:var(--gold);flex:0 0 auto}
+ .newshead{flex:1 1 auto;color:var(--txt)}
+ .newstime{flex:0 0 auto;color:var(--dim);font-size:13px;font-family:var(--mono)}
+ .newsrefresh{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--gold);border:1px solid var(--gold);
+   padding:1px 7px;letter-spacing:.04em;background:var(--panel);text-transform:uppercase;cursor:pointer}
+ .newsrefresh:hover{background:var(--panel3)}
+ .newsrefresh:disabled{opacity:.5;cursor:default}
+ .sentidot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+ .newscontracts{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;align-items:start;margin-bottom:14px}
+ .newscontracts>div{min-width:0}
+ .newscontracts .newsfeed,.newscontracts .ctscroll{max-height:520px;overflow:auto;margin-bottom:0}
+ .newscontracts .ctscroll table.datatbl{margin-bottom:0}
+ .newscontracts .ctscroll table.datatbl tbody td,.newscontracts .ctscroll table.datatbl thead th{padding:7px 10px}
+ @media (max-width:1000px){.newscontracts{grid-template-columns:minmax(0,1fr)}}
+ /* Contract awards: cyan text (orange's complement) so the section reads as its own panel. */
+ .ctheme,.ctheme h3,.ctheme td,.ctheme th,.ctheme .stat,.ctheme .healthchip,.ctheme .card{color:var(--ct)}
+ .ctheme .muted,.ctheme .sub,.ctheme table.datatbl thead th{color:var(--ct-dim)}
+ .ctheme .fcode,.ctheme .newsrefresh{color:var(--ct);border-color:var(--ct)}
+ .analyze-container{display:grid;grid-template-columns:1fr 280px;gap:20px;margin-bottom:20px}
+ .analyze-main{display:flex;flex-direction:column;gap:14px}
+ .analyze-sidebar{display:flex;flex-direction:column;gap:12px;max-height:fit-content}
+ .sidebar-card{background:var(--panel2);border:1px solid var(--line);padding:12px;font-size:14px}
+ .sidebar-badge{font-size:16px;font-weight:800;padding:8px;text-align:center}
+ .cograde{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+ .cogradebox{font-size:30px;font-weight:800;line-height:1;padding:8px 10px;border:1px solid var(--line2);min-width:56px;text-align:center;font-family:var(--mono)}
+ .cogradesub{font-size:12.5px;color:var(--dim);line-height:1.5}
+ .copillar{margin-bottom:7px}
+ .copillrow{display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:2px}
+ .copillbar{height:4px;background:var(--panel3);border:1px solid var(--line)}
+ .copillfill{height:100%}
+ .cometa{font-size:12.5px;color:var(--dim);line-height:1.7;border-top:1px solid var(--line);padding-top:8px;margin-top:8px}
+ .cosnap{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:14px}
+ .cosnapcell{background:var(--panel3);border:1px solid var(--line);padding:8px}
+ .cosnapk{font-size:11px;color:var(--dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:3px}
+ .cosnapv{font-size:15px;font-weight:700;color:var(--txt);font-family:var(--mono)}
+ .colists{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+ @media (max-width:760px){.colists{grid-template-columns:1fr}}
+ .colist h4{margin:0 0 6px;font-size:12.5px;letter-spacing:1px;text-transform:uppercase;color:var(--dim);font-weight:700}
+ .colist ul{margin:0;padding-left:16px;font-size:14px;line-height:1.7}
+ .colist li.co-pos{color:var(--buy)} .colist li.co-neg{color:var(--sell)}
+ .copara{font-size:14px;line-height:1.7;margin-bottom:10px}
+ .copara b{color:var(--gold)}
+ .cobottom{background:var(--panel3);border-left:3px solid var(--gold);padding:10px;font-size:14px;line-height:1.7}
+ .cosummary{font-size:14px;line-height:1.7;color:var(--dim);margin-bottom:12px}
+ .cohead{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+ .cobtn{background:var(--panel);color:var(--gold);border:1px solid var(--line2);padding:4px 10px;font-size:12.5px;font-family:var(--mono);cursor:pointer;font-weight:700}
+ .cobtn:hover{background:var(--panel3)}
+ .subtabs{display:flex;gap:0;border-bottom:1px solid var(--line);margin-bottom:12px}
+ .subtab-btn{flex:1;padding:6px 8px;background:transparent;color:var(--dim);border:none;font-size:14px;font-weight:600;cursor:pointer;border-bottom:2px solid transparent;font-family:inherit}
+ .subtab-btn.active{color:var(--gold);border-bottom-color:var(--gold)}
+ .subtab-btn:hover{background:var(--panel3)}
+ .ind-group{background:var(--panel3);border:1px solid var(--line2);padding:8px 12px;margin-right:12px;flex-shrink:0;margin-bottom:8px}
+ .ind-group-label{font-size:12.5px;color:var(--dim);font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;display:block}
+ .ind-group-controls{display:flex;gap:8px;flex-wrap:wrap}
+ @media (max-width:900px){.analyze-container{grid-template-columns:1fr}}
+
+ /* command line — security + function code entry, terminal-native pattern */
+ .cmdbar{display:flex;align-items:stretch;gap:0;border-bottom:1px solid var(--line);background:var(--panel3)}
+ .cmdseg{display:flex;align-items:center;gap:8px;padding:7px 14px;border-right:1px solid var(--line)}
+ .cmdseg .k{font-size:11px;color:var(--gold-dim);letter-spacing:.1em;font-weight:700;text-transform:uppercase}
+ .cmdseg .v{font-family:var(--mono);font-size:15.5px;font-weight:700;letter-spacing:.02em;color:var(--txt)}
+ .cmdhint{display:flex;align-items:center;padding:7px 14px;font-size:14px;color:var(--gold-dim);flex:1}
+ .cmdbar input{border:none;background:transparent;padding:0;font-size:15.5px}
+ .cmdbar #go-btn{border-radius:0;font-size:15px}
+
+ /* scrolling ticker ribbon */
+ .ribbon{overflow:hidden;border-bottom:1px solid var(--line);background:#120a00;height:26px;position:relative}
+ .ribbon-track{display:flex;align-items:center;height:26px;width:max-content;animation:tickribbon 40s linear infinite;white-space:nowrap}
+ .rtk{display:flex;align-items:center;gap:8px;padding:0 16px;font-family:var(--mono);font-size:14px;
+   color:#FF8C00;border-right:1px solid rgba(255,140,0,.25);height:100%}
+ .rtk b{font-weight:700}
+ .rtk .up{color:#4ADE80} .rtk .dn{color:#FF6B5E}
+ @keyframes tickribbon{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+ @media (prefers-reduced-motion: reduce){ .ribbon-track{animation:none} }
+
+ /* bottom key/status bar — physical-keyboard function keys as UI affordance */
+ .statusbar{display:flex;align-items:center;gap:8px;padding:10px 20px;margin-top:auto;border-top:1px solid var(--line);background:var(--panel3)}
+ .key{display:inline-flex;align-items:center;padding:4px 10px;border:1px solid var(--line2);border-radius:0;
+   font-family:var(--mono);font-size:12px;font-weight:700;letter-spacing:.06em;background:var(--panel);color:var(--txt)}
+ .statusbar .sess{font-family:var(--mono);font-size:13px;color:var(--gold-dim);letter-spacing:.03em;margin-left:auto}
+
+ /* hairline data tables — sector rotation / movers / any tabular report */
+ table.datatbl{width:100%;border-collapse:collapse;border:1px solid var(--line);background:var(--panel);margin-bottom:14px}
+ table.datatbl thead th{font-size:12px;color:var(--dim);letter-spacing:.08em;text-transform:uppercase;font-weight:700;
+   text-align:left;padding:6px 14px;border-bottom:1px solid var(--line);background:var(--panel3)}
+ table.datatbl thead th.num, table.datatbl td.num{text-align:right}
+ table.datatbl tbody td{padding:8px 14px;border-bottom:1px solid var(--line);font-size:15.5px}
+ table.datatbl tbody tr:last-child td{border-bottom:none}
+ table.datatbl tbody tr:hover td{background:var(--panel3)}
+ table.datatbl td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600}
+ table.datatbl td.tk{font-family:var(--mono);font-weight:700;letter-spacing:.02em}
+ table.datatbl.sectbl{max-width:960px}
+ table.datatbl.sectbl tbody tr:nth-child(even) td{background:rgba(255,255,255,.025)}
+ table.datatbl .miniBar{display:inline-block;width:60px;height:6px;background:var(--line);vertical-align:middle;margin-right:8px;position:relative;top:-1px}
+ table.datatbl .miniBar i{display:block;height:100%;background:var(--sell)}
+
+ @media (max-width:640px){
+  .top{padding:8px 12px;gap:8px} .brand{font-size:12px;letter-spacing:1px} .sublabel{font-size:9px;letter-spacing:1.5px}
+  .clock{font-size:14px} .pill{font-size:11px;padding:2px 6px}
+  .top .feeds{flex:1 1 100%;padding:0;margin:0;border-left:none;order:3;gap:8px;font-size:12.5px} .ctrl{padding:8px 12px}
+  .tabs{flex:1 1 100%}
+  .tab{padding:6px 9px;font-size:13px} .tabnum{margin-right:4px}
+  .main{padding:12px}
+  #wl{width:100%}
+  .hd .tk{font-size:25px} .hd .px{font-size:17.5px}
+  .grid2col,.topmovers{grid-template-columns:1fr}
+  .sigsumstats{grid-template-columns:repeat(2,1fr)}
+  #chart{height:min(58vh,480px);min-height:300px}
+  #entrysignal{max-width:56%}
+  .cmdbar{flex-wrap:wrap}
+  .ribbon{display:none}
+ }
+ /* ---- kept from the pre-amber page ---- */
+ :root{--blue:#3EC9E0;--purple:#B15CDE}
+ .sub a{color:var(--blue)}
+ .ahsplit h3{margin:0 0 10px}
  .cluster-badge{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-bottom:14px;padding:10px 14px;
-   background:var(--panel);border:1px solid var(--blue);border-left:4px solid var(--blue);border-radius:8px}
+   background:var(--panel);border:1px solid var(--blue);border-left:4px solid var(--blue);border-radius:0}
  .cluster-badge.high{background:#2f2710;border-color:var(--gold);border-left-color:var(--gold)}
  .cluster-icon{color:var(--blue);font-size:14px}.cluster-badge.high .cluster-icon{color:var(--gold)}
  .cluster-title{font-weight:800;letter-spacing:1px;font-size:12px;color:var(--txt)}
@@ -1346,35 +1607,24 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  .cluster-meta{margin-left:auto;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--dim)}
  @media(max-width:600px){.cluster-meta{margin-left:0;flex-basis:100%}}
  #chart{height:300px}
- .report{white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;line-height:1.55}
- .muted{color:var(--dim)}.loader{color:var(--gold)}iframe{width:100%;height:80vh;border:0;border-radius:10px;background:#fff}
- .wgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
- .tile{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--line);border-radius:9px;padding:14px;cursor:pointer}
- .tile:hover{border-color:var(--gold)}.tile.g{border-left-color:var(--buy)}.tile.b{border-left-color:var(--sell)}.tile.n{border-left-color:var(--amber)}
- .tile .t{font-size:19px;font-weight:800}.tile .p{font-family:ui-monospace,monospace;margin:4px 0}
- .tile .v{font-size:11px;letter-spacing:.5px}.tile .sc{float:right;font-family:ui-monospace,monospace;font-weight:800}
- .grid3{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
- .grid2col{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+ .report{white-space:pre-wrap;font-family:var(--mono);font-size:14px;line-height:1.55}
+ .muted{color:var(--dim)}.loader{color:var(--gold)}iframe{width:100%;height:80vh;border:1px solid var(--line);border-radius:0;background:#fff}
  .ahsplit{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:20px;align-items:start}
  .ahsplit.even{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
  .ahsplit h2{color:var(--gold);margin:0 0 12px;font-size:16px}
  .ahsplit.even .scrollbox{max-height:520px;overflow:auto}
  @media(max-width:1000px){.ahsplit{grid-template-columns:minmax(0,1fr)}}
  .heatgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:6px}
- .htile{border-radius:6px;padding:12px 10px;cursor:pointer;color:#fff;border:1px solid rgba(255,255,255,.06);min-height:78px}
+ .htile{padding:12px 10px;cursor:pointer;color:#fff;border:1px solid rgba(255,255,255,.06);min-height:78px}
  .htile:hover{outline:2px solid var(--gold)}
  .htile .t{font-size:16px;font-weight:800}.htile .c{font-family:ui-monospace,monospace;font-size:14px;margin-top:4px}
  .htile .s{font-size:10px;opacity:.8;margin-top:4px;letter-spacing:.5px}
  .heatkey{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--dim);margin-bottom:10px}
- .heatkey i{display:inline-block;width:18px;height:10px;border-radius:2px}
- .ohcard{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:12px;margin-bottom:10px}
- .ohh{display:flex;justify-content:space-between;margin-bottom:6px}.tagpill{font-size:11px;color:var(--amber)}
- .sub{font-size:12px;color:var(--dim);margin-top:3px}.sub a{color:var(--blue,#4F9DE0)}.stat{font-family:ui-monospace,monospace}
- h3{font-size:13px;letter-spacing:1px;margin:16px 0 8px}
- .diag-panel{display:flex;gap:16px}.diag-col{flex:1}.diag-status{display:flex;align-items:center;gap:10px;padding:14px;border-radius:8px;border:1px solid var(--line);margin-bottom:12px}
+ .heatkey i{display:inline-block;width:18px;height:10px;border-radius:0}
+ .diag-panel{display:flex;gap:16px}.diag-col{flex:1}.diag-status{display:flex;align-items:center;gap:10px;padding:14px;border-radius:0;border:1px solid var(--line);margin-bottom:12px}
  .diag-regime{font-size:18px;font-weight:700}.regime-bullish{color:var(--buy)}.regime-bearish{color:var(--sell)}.regime-neutral{color:var(--amber)}
  .ir-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
- .ir-card{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:10px;text-align:center}
+ .ir-card{background:var(--panel2);border:1px solid var(--line);border-radius:0;padding:10px;text-align:center}
  .ir-symbol{font-size:12px;font-weight:700;color:var(--gold);margin-bottom:4px}
  .ir-value{font-size:14px;font-family:ui-monospace;font-weight:700}
  .ir-positive{color:var(--buy)}.ir-negative{color:var(--sell)}.ir-neutral{color:var(--amber)}
@@ -1385,9 +1635,9 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 
  /* -------- news-first EDGAR feed (After-Hours tab) -------- */
  .newsbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:6px;flex-wrap:wrap;
-   background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px}
+   background:var(--panel2);border:1px solid var(--line);border-radius:0;padding:8px 10px;margin-bottom:8px}
  .newsbar .filt{background:var(--panel);color:var(--dim);border:1px solid var(--line);
-   padding:5px 12px;font-size:11px;font-weight:700;letter-spacing:.5px;border-radius:14px;cursor:pointer}
+   padding:5px 12px;font-size:11px;font-weight:700;letter-spacing:.5px;border-radius:0;cursor:pointer}
  .newsbar .filt:hover{border-color:var(--gold)}
  .newsbar .filt.active{background:var(--gold);color:#241a05;border-color:var(--gold)}
  .newstatus{margin-left:auto;font-size:11px;color:var(--dim);display:flex;align-items:center;gap:5px;white-space:nowrap}
@@ -1401,7 +1651,7 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  .newstable tbody tr:hover{background:rgba(200,162,75,.06)}
  .newstable td{padding:5px 8px;vertical-align:top;line-height:1.4}
  .ev-tkr{font-weight:800;font-family:ui-monospace,Menlo,monospace;color:var(--txt);white-space:nowrap}
- .ev-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:800;
+ .ev-badge{display:inline-block;padding:2px 8px;border-radius:0;font-size:10px;font-weight:800;
    letter-spacing:.4px;white-space:nowrap}
  .ev-badge.buy{background:#0f2f22;color:var(--buy)}
  .ev-badge.sell-big{background:#2f1414;color:var(--sell)}
@@ -1415,35 +1665,41 @@ _PAGE_BASE = ("""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  .ev-src a{color:var(--blue);text-decoration:none}.ev-src a:hover{text-decoration:underline}
  .ev-ts{color:var(--dim);white-space:nowrap;font-family:ui-monospace,monospace;font-size:11px}
  .ev-amt{font-weight:800}
- ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
 </style></head><body>
 <div class="top"><span class="diamond">◆</span><div><div class="brand">MERIDIAN</div>
-  <div class="sublabel">SYSTEM</div></div>
-  <div class="spacer"></div><span class="pill" id="sess">—</span><span class="clock" id="clock">--:--:-- ET</span></div>
-<div class="feeds"><span class="lbl">DATA FEEDS</span>__FEEDS__<span class="stream" id="stream">● STREAMING</span></div>
+  <div class="sublabel">QUANTITATIVE&nbsp;&nbsp;TRADING&nbsp;&nbsp;TERMINAL</div></div>
+  <div class="feeds"><span class="lbl">DATA FEEDS</span>__FEEDS__<span class="stream" id="stream">● STREAMING</span></div>
+  <span class="pill" id="sess">—</span><span class="clock" id="clock">--:--:-- ET</span></div>
+<div class="cmdbar">
+  <div class="cmdseg"><span class="k">Security</span>
+    <input id="tk" value="NVDA" onkeydown="if(event.key==='Enter'){view('analyze');go()}"></div>
+  <div class="cmdhint">Enter a ticker, press GO to analyze</div>
+  <button id="go-btn" onclick="view('analyze');go()">GO&nbsp;⏎</button>
+</div>
+<div class="ribbon"><div class="ribbon-track" id="ribbontrack"></div></div>
 <div class="ctrl">
   <div class="tabs">
-    <button class="tab active" data-v="dash" onclick="view('dash')">Dashboard</button>
-    <button class="tab" data-v="analyze" onclick="view('analyze')">Analyze</button>
-    <button class="tab" data-v="screen" onclick="view('screen')">Screener</button>
-    <button class="tab" data-v="watchlist" onclick="view('watchlist')">Watchlists</button>
-    <button class="tab" data-v="mlscreen" onclick="view('mlscreen')">ML Screener</button>
-    <button class="tab" data-v="diag" onclick="view('diag')">Diagnostics</button>
-    <button class="tab" data-v="heat" onclick="view('heat')">Heat Map</button>
-    <button class="tab" data-v="ah" onclick="view('ah')">After-Hours</button>
-    <button class="tab" data-v="dod" onclick="view('dod')">DoD Awards</button>
-    <button class="tab" data-v="mb" onclick="view('mb')">Morning</button>
-    <button class="tab" data-v="tr" onclick="view('tr')">Track Record</button>
+    <button class="tab active" data-v="dash" onclick="view('dash')"><span class="tabnum">1</span>Dashboard</button>
+    <button class="tab" data-v="analyze" onclick="view('analyze')"><span class="tabnum">2</span>Analyze</button>
+    <button class="tab" data-v="heat" onclick="view('heat')"><span class="tabnum">3</span>Heat Map</button>
+    <button class="tab" data-v="screen" onclick="view('screen')"><span class="tabnum">4</span>Screener</button>
+    <button class="tab" data-v="watchlist" onclick="view('watchlist')"><span class="tabnum">5</span>Watchlists</button>
+    <button class="tab" data-v="mlscreen" onclick="view('mlscreen')"><span class="tabnum">6</span>ML Screener</button>
+    <button class="tab" data-v="diag" onclick="view('diag')"><span class="tabnum">7</span>Diagnostics</button>
+    <button class="tab" data-v="ah" onclick="view('ah')"><span class="tabnum">8</span>After-Hours</button>
+    <button class="tab" data-v="dod" onclick="view('dod')"><span class="tabnum">9</span>DoD Awards</button>
+    <button class="tab" data-v="mb" onclick="view('mb')"><span class="tabnum">10</span>Morning</button>
+    <button class="tab" data-v="tr" onclick="view('tr')"><span class="tabnum">11</span>Track Record</button>
   </div>
   <span class="spacer"></span>
-  <input id="tk" value="NVDA" onkeydown="if(event.key==='Enter'){view('analyze');go()}">
-  <button onclick="view('analyze');go()">Analyze</button>
   <label class="toggle"><input type="checkbox" id="demo" style="width:auto"> Demo</label>
 </div>
 <div class="ctrl" id="wlrow"><span class="lbl">WATCHLIST</span>
   <input id="wl" value="NVDA,AMD,AAPL,MSFT,TSLA,SOFI,PLTR,AMZN">
   <button onclick="refresh()">Refresh</button><span class="muted" id="wlnote"></span></div>
 <div class="main" id="main"></div>
+<div class="statusbar"><span class="key">HELP</span><span class="key">MENU</span>
+  <span class="sess" id="termsess">TERMINAL LOCAL · SESSION LIVE</span></div>
 <script>
 const $=id=>document.getElementById(id); let V='dash', chart=null, timer=null;
 function demo(){return $('demo').checked?1:0} function wl(){return encodeURIComponent($('wl').value)}
@@ -1453,7 +1709,7 @@ function renderVerdict(data){const r=(data.regime||'').toLowerCase();
 function clock(){const n=new Date(new Date().toLocaleString('en-US',{timeZone:'America/New_York'}));
  $('clock').textContent=n.toTimeString().slice(0,8)+' ET';const m=n.getHours()*60+n.getMinutes();let s='CLOSED';
  if(n.getDay()>0&&n.getDay()<6){if(m>=240&&m<570)s='PRE-MARKET';else if(m>=570&&m<960)s='MARKET OPEN';else if(m>=960&&m<1200)s='AFTER HOURS';}
- $('sess').textContent=s;const live=s!=='CLOSED';$('stream').textContent=(live?(n.getSeconds()%2?'○':'●'):'○')+(live?' STREAMING':' IDLE');
+ $('sess').textContent=s;const live=s!=='CLOSED';$('sess').className='pill'+(live?' good':'');$('stream').textContent=(live?(n.getSeconds()%2?'○':'●'):'○')+(live?' STREAMING':' IDLE');
  $('stream').style.color=live?'var(--buy)':'var(--dim)';}
 setInterval(clock,1000);clock();
 function view(v){V=v;$('wlnote').textContent='';document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.v===v));
@@ -1486,43 +1742,98 @@ async function screenCategory(cat){const my=V;$('main').innerHTML='<div class="l
   if(d.error){$('main').innerHTML='<div class="card" style="color:var(--sell)">'+d.error+'</div>';return;}
   const f=document.createElement('iframe');f.srcdoc=d.html;$('main').innerHTML='';$('main').appendChild(f);
  }catch(e){if(V!==my)return;$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+function esc(x){return String(x==null?'':x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+let mktChart=null;
+function drawMktChart(bars){
+ const el=$('mktchart'); if(!el||!window.LightweightCharts||!bars||!bars.length) return;
+ if(mktChart){try{mktChart.remove();}catch(e){} mktChart=null;}
+ mktChart=LightweightCharts.createChart(el,{autoSize:true,layout:{background:{color:'transparent'},textColor:'#FF8C00'},
+   grid:{vertLines:{color:'#4a2a05'},horzLines:{color:'#4a2a05'}},rightPriceScale:{borderColor:'#4a2a05'},
+   timeScale:{borderColor:'#4a2a05'},crosshair:{mode:0}});
+ const s=mktChart.addAreaSeries({lineColor:'#FFB347',topColor:'rgba(255,140,0,.30)',bottomColor:'rgba(255,140,0,0)',lineWidth:2});
+ s.setData(bars.map(b=>({time:b.time,value:b.close})));
+ mktChart.timeScale().fitContent();
+}
+const sgn=v=>(v>=0?'+':'')+v;
+function dashHtml(D,ah,gov,dod,cats){
+ const d=D.watchlist, sm=D.summary||{}, mv=D.movers||{gainers:[],losers:[]};
+ const open=t=>`$('tk').value='${esc(t)}';view('analyze');go()`;
+ let h='';
+ if(D.health&&D.health.length){h+='<div class="healthstrip">'+D.health.map(c=>{
+   const lbl=c.status==='missing'?'no data':c.age_hours<1?Math.round(c.age_hours*60)+'m ago':c.age_hours<48?c.age_hours.toFixed(1)+'h ago':Math.round(c.age_hours/24)+'d ago';
+   return `<div class="healthchip ${c.status}"><span class="healthdot ${c.status}"></span>${esc(c.label)} · ${lbl}</div>`;}).join('')+'</div>';}
+ h+='<div class="ahsplit even" style="margin-bottom:20px"><section><h3>SEC EDGAR News <span class="fcode">SEC</span></h3><div class="scrollbox">';
+ h+=ah.html?ah.html:'<div class="muted">'+esc(ah.error||'EDGAR news unavailable.')+'</div>';
+ h+='</div></section><section class="ctheme"><h3>Contract Awards <span class="fcode">GOVT</span></h3><div class="scrollbox">';
+ h+=gov.html?gov.html:'<div class="muted">'+esc(gov.error||'Government contracts unavailable.')+'</div>';
+ h+='<h3 style="margin-top:20px">DoD Contract Awards <span class="fcode">DOD</span></h3>';
+ h+=dod.html?dod.html:'<div class="muted">'+esc(dod.error||'DoD awards unavailable.')+'</div>';
+ h+='</div></section></div>';
+ h+='<h3>Benchmarks <span class="fcode">IDX</span></h3><div class="mkstrip">';
+ for(const m of (D.market&&D.market.indices||[])){const mc=m.chg>=0?'var(--buy)':'var(--sell)';
+  h+=`<div class="mkcard"><div class="mkname">${esc(m.name)}</div><div class="mkrow"><b>${esc(m.ticker)}</b><span class="mkpx">${m.last}</span>
+   <span style="color:${mc}">${sgn(m.chg)}%</span></div><div class="mkspark">${m.spark}</div></div>`;}
+ h+='</div>';
+ if(sm.total){const col=(n,c)=>n>0?c:'var(--dim)';
+  h+=`<h3>Signal Summary <span class="fcode">SUMM</span></h3><div class="sigsumstats">
+   <div class="sigstat"><div class="sigval" style="color:${col(sm.buy,'var(--buy)')}">${sm.buy}</div><div class="siglabel">Buy</div></div>
+   <div class="sigstat"><div class="sigval" style="color:${col(sm.hold,'var(--amber)')}">${sm.hold}</div><div class="siglabel">Hold</div></div>
+   <div class="sigstat"><div class="sigval" style="color:${col(sm.avoid,'var(--sell)')}">${sm.avoid}</div><div class="siglabel">Avoid</div></div>
+   <div class="sigstat"><div class="sigval">${sm.avg_score}</div><div class="siglabel">Avg Score</div></div></div>`;}
+ h+='<h3>Sector Rotation <span class="fcode">ROT</span></h3><table class="datatbl sectbl"><thead><tr><th>Sector</th><th class="num">Perf.</th><th>Momentum</th><th class="num">Winners</th><th class="num">Losers</th></tr></thead><tbody>';
+ for(const x of (D.sectors||[])){const up=x.avg_chg>=0, mp=Math.max(0,Math.min(100,Math.abs(x.momentum)));
+  h+=`<tr style="cursor:pointer" title="Load this sector's tickers" data-t="${esc(x.tickers)}" onclick="$('wl').value=this.dataset.t;refresh()">
+   <td>${esc(x.name)}</td><td class="num" style="color:var(${up?'--buy':'--sell'})">${sgn(x.avg_chg)}%</td>
+   <td><span class="miniBar"><i style="width:${mp}%;background:var(${x.momentum>=0?'--buy':'--sell'})"></i></span>${sgn(x.momentum)}</td>
+   <td class="num" style="color:var(--buy)">${x.winners}</td><td class="num" style="color:var(--sell)">${x.losers}</td></tr>`;}
+ if(!(D.sectors||[]).length)h+='<tr><td colspan="5" class="muted">no data</td></tr>';
+ h+='</tbody></table>';
+ const movRows=(rs,c)=>rs.map(r=>`<tr style="cursor:pointer" onclick="${open(r.ticker)}"><td class="tk">${esc(r.ticker)}</td>
+   <td class="num" style="color:var(${c})">${sgn(r.chg)}%</td><td class="num">${r.score}</td></tr>`).join('')||'<tr><td colspan="3" class="muted">none</td></tr>';
+ if(mv.gainers.length||mv.losers.length)
+  h+=`<h3>Top Gainers / Losers <span class="fcode">MOV</span></h3><div class="topmovers">
+   <table class="datatbl"><thead><tr><th>Gainers</th><th class="num">Chg %</th><th class="num">Score</th></tr></thead><tbody>${movRows(mv.gainers,'--buy')}</tbody></table>
+   <table class="datatbl"><thead><tr><th>Losers</th><th class="num">Chg %</th><th class="num">Score</th></tr></thead><tbody>${movRows(mv.losers,'--sell')}</tbody></table></div>`;
+ h+=`<div class="card" style="padding:14px 18px"><div class="ohh"><b style="font-size:15px;letter-spacing:1.5px;color:var(--gold);text-transform:uppercase">Market Pulse — SPY</b>
+   <span class="muted" style="font-size:14px">daily · 6mo</span></div><div id="mktchart" style="height:170px"></div></div>`;
+ const up=d.filter(r=>r.chg>0).length, dn=d.filter(r=>r.chg<0).length, avg=d.length?d.reduce((a,r)=>a+r.chg,0)/d.length:0;
+ h+=`<div class="breadth"><div class="breadthbar"><div class="breadthfill" style="width:${(d.length?up/d.length*100:50).toFixed(0)}%"></div></div>
+   <div class="breadthtext"><b style="color:var(--buy)">${up} advancing</b> · <b style="color:var(--sell)">${dn} declining</b> · avg
+   <b style="color:var(${avg>=0?'--buy':'--sell'})">${sgn(+avg.toFixed(2))}%</b></div></div>`;
+ h+='<h3>Your Watchlist <span class="fcode">WL</span></h3><div class="wgrid">';
+ for(const r of d){const c=r.tone==='good'?'g':r.tone==='bad'?'b':'n', cc=r.chg>=0?'var(--buy)':'var(--sell)',
+   tc=r.tone==='good'?'var(--buy)':r.tone==='bad'?'var(--sell)':'var(--amber)';
+  h+=`<div class="tile ${c}" onclick="${open(r.ticker)}"><span class="sc" style="color:${tc}">${r.score>0?'+':''}${r.score}</span>
+   <div class="t">${esc(r.ticker)} <span style="color:var(--amber)">${r.whale}</span></div><div class="tilespark">${r.spark||''}</div>
+   <div class="p">${r.last} <span style="color:${cc}">${sgn(r.chg)}%</span></div><div class="v" style="color:${tc}">${esc(r.verdict)}</div>
+   <div class="rvol">rvol ${r.rvol}x</div></div>`;}
+ h+='</div><h3 style="margin-top:20px">Discover by Strategy <span class="fcode">STRAT</span></h3><div class="grid3">';
+ for(const[k,v]of Object.entries(cats)){
+  h+=`<div class="tile n" onclick="screenCategory('${k}')"><div class="t" style="font-size:15px;color:var(--gold);letter-spacing:.5px">${esc(v.name.toUpperCase())}</div>
+   <div class="sub" style="margin:6px 0 8px">${esc(v.desc)}</div><div class="rvol">${v.count} tickers <span style="color:var(--gold);float:right;font-weight:700">→</span></div></div>`;}
+ return h+'</div>';
+}
+function dashRibbon(d){let r='';for(const x of d){r+=`<div class="rtk"><b>${esc(x.ticker)}</b> ${x.last} <span class="${x.chg>=0?'up':'dn'}">${sgn(x.chg)}%</span></div>`;}
+ const t=$('ribbontrack'); if(t)t.innerHTML=r+r;}
 async function refresh(){const my=V;$('wlnote').textContent='updating…';
- try{const [d, cats, ah, gov, dod]=await Promise.all([
-  fetch('/api/watchlist?demo='+demo()+'&tickers='+wl()).then(r=>r.json()),
+ try{const [D, cats, ah, gov, dod, ohlc]=await Promise.all([
+  fetch('/api/dashboard?demo='+demo()+'&tickers='+wl()).then(r=>r.json()),
   fetch('/api/categories').then(r=>r.json()),
   fetch('/api/afterhours?demo='+demo()+'&tickers='+wl()).then(r=>r.json()).catch(()=>({})),
   fetch('/api/gov_contracts?demo='+demo()+'&tickers='+wl()).then(r=>r.json()).catch(()=>({})),
-  fetch('/api/dod_awards?demo='+demo()+'&tickers='+wl()).then(r=>r.json()).catch(()=>({}))]);
+  fetch('/api/dod_awards?demo='+demo()+'&tickers='+wl()).then(r=>r.json()).catch(()=>({})),
+  fetch('/api/ohlc?demo='+demo()+'&ticker=SPY').then(r=>r.json()).catch(()=>({}))]);
   if(V!==my)return;
-  if(!Array.isArray(d)){$('main').innerHTML='<div class="card" style="color:var(--sell)">Watchlist unavailable: '+((d&&d.error)||'unexpected response')+'</div>';$('wlnote').textContent='';return;}
-  let h='<div style="padding:0">';
-  h+='<div class="ahsplit even" style="margin-bottom:20px"><section><h2>SEC EDGAR NEWS</h2><div class="scrollbox">';
-  h+=ah.html?ah.html:'<div class="muted">'+(ah.error||'EDGAR news unavailable.')+'</div>';
-  h+='</div></section><section><h2>CONTRACT AWARDS</h2><div class="scrollbox">';
-  h+=gov.html?gov.html:'<div class="muted">'+(gov.error||'Government contracts unavailable.')+'</div>';
-  h+='<h2 style="margin-top:20px">DOD CONTRACT AWARDS</h2>';
-  h+=dod.html?dod.html:'<div class="muted">'+(dod.error||'DoD awards unavailable.')+'</div>';
-  h+='</div></section></div>';
-  h+='<h2 style="color:var(--gold);margin:0 0 12px;font-size:16px">YOUR WATCHLIST</h2>';
-  h+='<div class="wgrid">';for(const r of d){const c=r.tone==='good'?'g':r.tone==='bad'?'b':'n';
-   const cc=r.chg>=0?'var(--buy)':'var(--sell)';
-   h+=`<div class="tile ${c}" onclick="$('tk').value='${r.ticker}';view('analyze');go()">
-     <span class="sc" style="color:${r.tone==='good'?'var(--buy)':r.tone==='bad'?'var(--sell)':'var(--amber)'}">${r.score>0?'+':''}${r.score}</span>
-     <div class="t">${r.ticker} <span style="color:var(--amber)">${r.whale}</span></div>
-     <div class="p">${r.last} <span style="color:${cc}">${r.chg>=0?'+':''}${r.chg}%</span></div>
-     <div class="v" style="color:${r.tone==='good'?'var(--buy)':r.tone==='bad'?'var(--sell)':'var(--amber)'}">${r.verdict}</div></div>`;}
-  h+='</div>';
-  h+='<h2 style="color:var(--gold);margin:20px 0 12px;font-size:16px">DISCOVER BY STRATEGY</h2>';
-  h+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">';
-  for(const[k,v]of Object.entries(cats)){
-   h+=`<div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;cursor:pointer;transition:all 0.2s" onmouseover="this.style.borderColor='var(--gold)'" onmouseout="this.style.borderColor='var(--line)'" onclick="screenCategory('${k}')">
-    <div style="font-weight:700;font-size:13px;color:var(--gold);margin-bottom:4px;letter-spacing:0.5px">${v.name.toUpperCase()}</div>
-    <div style="font-size:11px;color:var(--dim);line-height:1.4;margin-bottom:8px">${v.desc}</div>
-    <div style="display:flex;justify-content:space-between;align-items:center">
-     <span style="font-size:10px;color:var(--dim)">${v.count} tickers</span>
-     <span style="color:var(--blue);font-weight:700">→</span></div></div>`;}
-  h+='</div></div>';$('main').innerHTML=h;$('wlnote').textContent='updated '+new Date().toLocaleTimeString();
- }catch(e){if(V!==my)return;$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
+  if(!D||!Array.isArray(D.watchlist)){
+   // a transient blip shouldn't blank a dashboard that's already on screen
+   if($('main').innerHTML.trim()&&$('mktchart')){$('wlnote').textContent='update failed, retrying…';return;}
+   $('main').innerHTML='<div class="card" style="color:var(--sell)">Dashboard unavailable: '+esc((D&&D.error)||'unexpected response')+'</div>';$('wlnote').textContent='';return;}
+  $('main').innerHTML=dashHtml(D,ah,gov,dod,cats);
+  $('wlnote').textContent='updated '+new Date().toLocaleTimeString();
+  dashRibbon(D.watchlist); drawMktChart(ohlc.bars);
+ }catch(e){if(V!==my)return;
+  if($('main').innerHTML.trim()&&$('mktchart')){$('wlnote').textContent='update failed, retrying…';}
+  else{$('main').innerHTML='<div class="card" style="color:var(--sell)">'+esc(e)+'</div>';}}}
 async function go(){const my=V;const t=$('tk').value.trim().toUpperCase()||'NVDA';
  $('main').innerHTML='<div class="loader">Analyzing '+t+'… technicals, fundamentals, alt-data, order flow…</div>';
  try{const [a,o]=await Promise.all([fetch('/api/analyze?demo='+demo()+'&ticker='+t).then(r=>r.json()),
@@ -1541,10 +1852,10 @@ async function go(){const my=V;const t=$('tk').value.trim().toUpperCase()||'NVDA
   if(!o.error)drawChart(o.bars);
  }catch(e){if(V!==my)return;$('main').innerHTML='<div class="card" style="color:var(--sell)">'+e+'</div>';}}
 function drawChart(bars){const el=$('chart');if(!el||!window.LightweightCharts||!bars||!bars.length)return;
- chart=LightweightCharts.createChart(el,{autoSize:true,layout:{background:{color:'#10161F'},textColor:'#C9D6E2'},
-   grid:{vertLines:{color:'#1b2532'},horzLines:{color:'#1b2532'}},rightPriceScale:{borderColor:'#232F3D'},
-   timeScale:{borderColor:'#232F3D'},crosshair:{mode:0}});
- const s=chart.addCandlestickSeries({upColor:'#2ECC8F',downColor:'#FF5449',wickUpColor:'#2ECC8F',wickDownColor:'#FF5449',borderVisible:false});
+ chart=LightweightCharts.createChart(el,{autoSize:true,layout:{background:{color:'#000000'},textColor:'#FF8C00'},
+   grid:{vertLines:{color:'#4a2a05'},horzLines:{color:'#4a2a05'}},rightPriceScale:{borderColor:'#4a2a05'},
+   timeScale:{borderColor:'#4a2a05'},crosshair:{mode:0}});
+ const s=chart.addCandlestickSeries({upColor:'#4ADE80',downColor:'#FF6B5E',wickUpColor:'#4ADE80',wickDownColor:'#FF6B5E',borderVisible:false});
  s.setData(bars);chart.timeScale().fitContent();}
 async function load(url,name){const my=V;$('main').innerHTML='<div class="loader">Loading '+name+'…</div>';
  try{const d=await(await fetch(url+'?demo='+demo()+'&tickers='+wl())).json();
