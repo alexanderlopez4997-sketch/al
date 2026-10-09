@@ -61,6 +61,15 @@ The server prints the link to open on your phone. The dashboard has **no
 login**, so only do this on a network you trust — see `deploy/DEPLOY.md` for
 deploying it behind auth on a VPS.
 
+### Dashboard tab
+
+The amber "Quantitative Terminal" look: a command bar and scrolling ticker tape,
+data-freshness chips, the SEC EDGAR news and contract-award panels, a benchmark
+strip (SPY / QQQ / DIA / IWM), the watchlist's buy/hold/avoid signal summary,
+sector rotation, top gainers/losers, a SPY chart, and your watchlist tiles with
+sparklines and relative volume. All of it comes from one `/api/dashboard` call
+(`market_dashboard.py`), refreshed every 30 seconds.
+
 ### Install as an app
 
 The dashboard is an installable web app (manifest + service worker). With

@@ -2040,6 +2040,58 @@ check("a URL with no XSL folder is fetched once, unchanged", len(_c) == 1 and _c
 with unittest.mock.patch.object(edgar, "_get_bytes", side_effect=_fake_edgar([], xsl_serves="404", raw_serves="404")):
     check("both locations failing still degrades to None, never raises", edgar._parse_form4(_XSL_URL) is None)
 
+# ------------------------------------------------------ market dashboard ----
+section("market_dashboard widgets")
+import market_dashboard as md
+_rows = [
+    {"ticker": "NVDA", "chg": 3.0, "score": 40, "last": 100.0, "verdict": "BUY signal"},
+    {"ticker": "AMD", "chg": -1.0, "score": -20, "last": 50.0, "verdict": "STRONG AVOID"},
+    {"ticker": "MSFT", "chg": 1.0, "score": 0, "last": 300.0, "verdict": "HOLD / no edge"},
+    {"ticker": "ZZZZ", "chg": 0.0, "score": 0, "last": 5.0, "verdict": "HOLD / no edge"},
+]
+_ss = md.signal_summary(_rows)
+check("signal_summary counts verdict words", (_ss["buy"], _ss["hold"], _ss["avoid"], _ss["total"]) == (1, 2, 1, 4))
+check("signal_summary avg score", _ss["avg_score"] == 5.0)
+check("signal_summary empty watchlist doesn't divide by zero", md.signal_summary([])["avg_score"] == 0)
+_sr = md.sector_rotation(_rows)["sectors"]
+_by = {x["name"]: x for x in _sr}
+check("sector_rotation groups via SECTOR_MAP, unknown -> Other",
+      set(_by) == {"Technology", "Semiconductors", "Other"})
+check("sector_rotation sorted best sector first", [x["name"] for x in _sr][0] == "Technology")
+check("sector_rotation tech avg change/winners", _by["Technology"]["avg_chg"] == 2.0 and _by["Technology"]["winners"] == 2
+      and _by["Technology"]["tickers"] == "NVDA,MSFT")
+check("sector_rotation losers counted", _by["Semiconductors"]["losers"] == 1 and _by["Other"]["winners"] == 0)
+_mv = md.top_movers(_rows)
+check("top_movers gainers/losers only list actual movers",
+      [g_["ticker"] for g_ in _mv["gainers"]] == ["NVDA", "MSFT"] and [l_["ticker"] for l_ in _mv["losers"]] == ["AMD"])
+check("top_movers caps at n", len(md.top_movers([dict(_rows[0], ticker=f"T{i}", chg=i + 1) for i in range(9)])["gainers"]) == 3)
+_sp = md.price_spark_svg([1, 2, 3, 4])
+check("sparkline is green when up, red when down, '' when too short",
+      md.price_spark_svg([1, 2, 3])[0:4] == "<svg" and "#4ADE80" in _sp and "#FF6B5E" in md.price_spark_svg([4, 3, 2, 1])
+      and md.price_spark_svg([1]) == "" and "#FF6B5E" in md.price_spark_svg([1, 2, 3], up=False))
+check("sparkline tolerates flat series", "polyline" in md.price_spark_svg([5, 5, 5]))
+_mo = md.market_overview(True)["indices"]
+check("market_overview (demo) returns the four benchmarks with a sparkline",
+      [i["ticker"] for i in _mo] == ["SPY", "QQQ", "DIA", "IWM"] and all(i["spark"].startswith("<svg") for i in _mo))
+with tempfile.TemporaryDirectory() as _d:
+    _now = time.time()
+    for _name, _age_h in (("fresh.json", 1), ("warn.json", 30), ("stale.json", 100)):
+        _fp = os.path.join(_d, _name); open(_fp, "w").write("{}")
+        os.utime(_fp, (_now - _age_h * 3600, _now - _age_h * 3600))
+    _chk = [("Fresh", "fresh.json", 24, 96), ("Warn", "warn.json", 24, 96), ("Stale", "stale.json", 24, 96),
+            ("Gone", "nope.json", 24, 96)]
+    _h = {c["label"]: c for c in md.system_health(base=_d, now=_now, checks=_chk)["checks"]}
+    check("system_health ok/warn/stale/missing", (_h["Fresh"]["status"], _h["Warn"]["status"], _h["Stale"]["status"],
+          _h["Gone"]["status"]) == ("ok", "warn", "stale", "missing") and _h["Gone"]["age_hours"] is None)
+    check("system_health reports age in hours", _h["Warn"]["age_hours"] == 30.0)
+_dash = ws._dashboard(["NVDA", "AMD", "MSFT"], True)
+check("web_server._dashboard bundles every widget from one watchlist",
+      set(_dash) == {"watchlist", "market", "sectors", "movers", "summary", "health"}
+      and len(_dash["watchlist"]) == 3 and _dash["summary"]["total"] == 3
+      and all("spark" in r and "rvol" in r for r in _dash["watchlist"]))
+check("the dashboard page ships the amber theme + the new widgets",
+      "--gold:#FFA630" in ws._get_page() and 'id="ribbontrack"' in ws._get_page() and "dashHtml" in ws._get_page())
+
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")
 print(f"RESULTS: {_PASS} passed, {_FAIL} failed")
