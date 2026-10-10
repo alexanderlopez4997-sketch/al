@@ -53,6 +53,7 @@ import aapl_dashboard as ad
 import confirmation as cf
 import contract_crosscheck
 import market_dashboard as md
+import risk_status as rsk
 import contracts
 import dod_scraper
 
@@ -385,6 +386,7 @@ def _dashboard(tickers, demo):
             "sectors": md.sector_rotation(rows)["sectors"],
             "movers": md.top_movers(rows),
             "summary": md.signal_summary(rows),
+            "risk": rsk.risk_status(demo),
             "health": md.system_health()["checks"]}
 
 
@@ -1759,6 +1761,13 @@ function dashHtml(D,ah,gov,dod,cats){
  const d=D.watchlist, sm=D.summary||{}, mv=D.movers||{gainers:[],losers:[]};
  const open=t=>`$('tk').value='${esc(t)}';view('analyze');go()`;
  let h='';
+ const R=D.risk;
+ if(R&&R.available){const halt=R.status==='HALT', pc=v=>v==null?'n/a':v+'%';
+  h+=`<div class="riskbanner${halt?' halt':''}"><b style="letter-spacing:1.5px;font-size:15px;color:var(${halt?'--sell':'--buy'})">KILL-SWITCH ${halt?'HALT':'ACTIVE'}</b>
+   <div class="riskstats"><span>equity <b>$${Math.round(R.equity).toLocaleString('en-US')}</b></span><span>drawdown <b>${esc(R.current_drawdown)}</b></span>
+   <span>intraday <b>${pc(R.intraday_drawdown_pct)}</b></span><span>heat <b>${pc(R.portfolio_heat_pct)}</b> / ${R.portfolio_heat_cap_pct}% cap</span>
+   <span>VaR 1d <b>${pc(R.portfolio_var_1d_pct)}</b></span><span>positions <b>${R.open_positions}</b> / ${R.max_positions}</span></div>
+   ${halt?'<div style="flex:1 1 100%;color:var(--sell);font-size:14px">'+R.reasons.map(esc).join(' · ')+'</div>':''}</div>`;}
  if(D.health&&D.health.length){h+='<div class="healthstrip">'+D.health.map(c=>{
    const lbl=c.status==='missing'?'no data':c.age_hours<1?Math.round(c.age_hours*60)+'m ago':c.age_hours<48?c.age_hours.toFixed(1)+'h ago':Math.round(c.age_hours/24)+'d ago';
    return `<div class="healthchip ${c.status}"><span class="healthdot ${c.status}"></span>${esc(c.label)} · ${lbl}</div>`;}).join('')+'</div>';}
