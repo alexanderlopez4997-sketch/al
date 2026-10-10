@@ -2086,11 +2086,98 @@ with tempfile.TemporaryDirectory() as _d:
     check("system_health reports age in hours", _h["Warn"]["age_hours"] == 30.0)
 _dash = ws._dashboard(["NVDA", "AMD", "MSFT"], True)
 check("web_server._dashboard bundles every widget from one watchlist",
-      set(_dash) == {"watchlist", "market", "sectors", "movers", "summary", "health"}
+      set(_dash) == {"watchlist", "market", "sectors", "movers", "summary", "risk", "health"}
       and len(_dash["watchlist"]) == 3 and _dash["summary"]["total"] == 3
       and all("spark" in r and "rvol" in r for r in _dash["watchlist"]))
 check("the dashboard page ships the amber theme + the new widgets",
       "--gold:#FFA630" in ws._get_page() and 'id="ribbontrack"' in ws._get_page() and "dashHtml" in ws._get_page())
+
+# ------------------------------------------------------------ risk status ----
+section("risk_status (dashboard risk bar)")
+import risk_status as rsk
+from datetime import datetime as _dt
+rsk._daily_returns = lambda symbols, period="3mo": pd.DataFrame()   # never hit the network from tests
+_NOW = _dt(2026, 10, 9, 15, 0)
+def _write(d, name, obj):
+    with open(os.path.join(d, name), "w") as f:
+        json.dump(obj, f)
+_pos = {"AAPL": {"entry_price": 100.0, "stop_loss": 95.0, "shares": 100, "notional": 10000.0, "risk_dollars": 500.0}}
+with tempfile.TemporaryDirectory() as _d:
+    _none = os.path.join(_d, "nope.csv")
+    _s = rsk.RiskSnapshot(data_dir=_d, trades_log=_none).status(_NOW)
+    check("no state files -> Meridian's defaults ($100k, no positions, ACTIVE)",
+          _s["equity"] == 100000 and _s["status"] == "ACTIVE" and _s["open_positions"] == 0
+          and _s["portfolio_heat_pct"] == 0 and _s["portfolio_var_1d_pct"] == 0.0 and _s["reasons"] == []
+          and _s["current_drawdown"] == "0.00%" and _s["max_positions"] == 15 and _s["portfolio_heat_cap_pct"] == 6.0)
+    _write(_d, "positions.json", _pos); _write(_d, "account.json", {"initial_capital": 100000, "current_value": 50000})
+    _r = rsk.RiskSnapshot(data_dir=_d, trades_log=_none)
+    check("heat = open risk dollars / equity", _r.heat_pct() == 1.0 and _r.status(_NOW)["open_positions"] == 1)
+    check("equity comes from account.json current_value", _r.status(_NOW)["equity"] == 50000)
+    # drawdown from running peak
+    _write(_d, "equity_curve.json", [{"date": "2026-10-01T10:00:00", "value": v} for v in (100000, 95000, 89000)])
+    _k = rsk.RiskSnapshot(data_dir=_d, trades_log=_none).kill_switch(_NOW)
+    check("max drawdown breach halts and names the reason",
+          _k["status"] == "HALT" and any("Max drawdown breached" in x for x in _k["reasons"]) and _k["current_drawdown"] == "-11.00%")
+    _write(_d, "equity_curve.json", [{"date": "2026-10-01T10:00:00", "value": v} for v in (100000, 99000, 96500)])
+    _k = rsk.RiskSnapshot(data_dir=_d, trades_log=_none).kill_switch(_NOW)
+    check("daily loss limit halts (-2.53% is under the 3% limit, so it does not)", _k["status"] == "ACTIVE")
+    _write(_d, "equity_curve.json", [{"date": "2026-10-01T10:00:00", "value": v} for v in (100000, 99000, 96000)])
+    _k = rsk.RiskSnapshot(data_dir=_d, trades_log=_none).kill_switch(_NOW)
+    check("daily loss limit breach halts", _k["status"] == "HALT" and any("Daily loss limit" in x for x in _k["reasons"]))
+    # intraday: only TODAY's points count, and the trip latches after a recovery
+    _pts = [100000, 97500, 99900]
+    _write(_d, "equity_curve.json", [{"date": f"2026-10-09T0{9 + i}:00:00", "value": v} for i, v in enumerate(_pts)])
+    _i = rsk.RiskSnapshot(data_dir=_d, trades_log=_none).intraday_status(_NOW)
+    check("intraday halt latches even after equity recovers", _i["status"] == "HALT" and _i["current_drawdown_pct"] == 0.1)
+    _write(_d, "equity_curve.json", [{"date": f"2026-10-08T0{9 + i}:00:00", "value": v} for i, v in enumerate(_pts)])
+    check("yesterday's intraday trip does not carry over",
+          rsk.RiskSnapshot(data_dir=_d, trades_log=_none).intraday_status(_NOW)["status"] == "ACTIVE")
+    # consecutive losing trades
+    _csv = os.path.join(_d, "trades.csv")
+    with open(_csv, "w") as f:
+        f.write("date,symbol,entry_price,exit_price,hold_days,pnl_pct,signal_strength\n")
+        for _p in (2.0, -1, -1, -1, -1):
+            f.write(f"2026-10-0{1},X,1,1,1,{_p},0\n")
+    _write(_d, "equity_curve.json", [])
+    _k = rsk.RiskSnapshot(data_dir=_d, trades_log=_csv).kill_switch(_NOW)
+    check("4 consecutive losing trades halt", _k["status"] == "HALT" and any("consecutive losing" in x for x in _k["reasons"]))
+    with open(_csv, "a") as f:
+        f.write("2026-10-02,X,1,1,1,3.0,0\n")
+    check("a winner breaks the streak", rsk.RiskSnapshot(data_dir=_d, trades_log=_csv).kill_switch(_NOW)["status"] == "ACTIVE")
+with tempfile.TemporaryDirectory() as _d:
+    open(os.path.join(_d, "positions.json"), "w").write("{not json")
+    open(os.path.join(_d, "account.json"), "w").write(json.dumps({"initial_capital": -5, "current_value": 1}))
+    open(os.path.join(_d, "equity_curve.json"), "w").write(json.dumps([{"date": "x"}, 7, {"date": "2026-10-09", "value": 1.0}]))
+    _c = rsk.RiskSnapshot(data_dir=_d, trades_log=os.path.join(_d, "x.csv"))
+    check("corrupt positions/account fall back to defaults, junk curve points are dropped",
+          _c.positions == {} and _c.equity() == 100000 and len(rsk.load_equity_curve(_d)) == 1)
+    _write(_d, "positions.json", {"BAD": {"entry_price": -1}})
+    check("invalid position -> whole book rejected", rsk.load_positions(_d) == {})
+    _write(_d, "positions.json", [1, 2])
+    check("non-object positions.json is rejected", rsk.load_positions(_d) == {})
+_dm = rsk.risk_status(True)
+check("demo mode shows a HALT with reasons (synthetic drawn-down book)",
+      _dm["status"] == "HALT" and len(_dm["reasons"]) >= 2 and _dm["available"] is True)
+check("risk_status never raises on a broken snapshot",
+      rsk.risk_status(False, data_dir=object()).get("available") is False)
+check("historical_var is a positive loss percentage; empty -> 0",
+      abs(rsk.historical_var([-0.05] * 10 + [0.01] * 90) - 0.05) < 1e-9 and rsk.historical_var([]) == 0.0)
+_rets = pd.DataFrame({"AAPL": [-0.05] * 10 + [0.01] * 90, "MSFT": [0.0] * 100})
+_pos2 = dict(_pos, MSFT={"entry_price": 50.0, "stop_loss": 45.0, "shares": 200, "notional": 10000.0, "risk_dollars": 100.0})
+_saved = rsk._daily_returns
+rsk._daily_returns = lambda symbols, period="3mo": _rets
+with tempfile.TemporaryDirectory() as _d:
+    _write(_d, "positions.json", _pos2)
+    check("book VaR weights each symbol by its share of notional (50/50 -> 2.5%)",
+          rsk.RiskSnapshot(data_dir=_d).var_1d_pct() == 2.5)
+rsk._daily_returns = _saved
+with tempfile.TemporaryDirectory() as _d:
+    _write(_d, "positions.json", _pos)
+    check("VaR is n/a (None) when no price data is available, and the bar still builds",
+          rsk.RiskSnapshot(data_dir=_d).var_1d_pct() is None and rsk.RiskSnapshot(data_dir=_d).status()["portfolio_var_1d_pct"] is None)
+check("drawdown breaker empty history is ACTIVE", rsk.drawdown_circuit_breaker([])["status"] == "ACTIVE")
+check("/api/dashboard payload carries the risk block",
+      ws._dashboard(["NVDA"], True)["risk"]["available"] is True and "KILL-SWITCH" in ws._get_page())
 
 # ------------------------------------------------------------- summary ------
 print(f"\n{'='*50}")

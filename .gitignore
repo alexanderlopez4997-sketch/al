@@ -11,3 +11,7 @@ rebalance_log.json
 meridian_cache.db
 screener_report.html
 *.bak
+
+# local risk-bar state (risk_status.py reads these; Meridian's paper_trading/ folder can be copied in)
+paper_trading/
+logs/trades.csv

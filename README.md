@@ -70,6 +70,15 @@ sector rotation, top gainers/losers, a SPY chart, and your watchlist tiles with
 sparklines and relative volume. All of it comes from one `/api/dashboard` call
 (`market_dashboard.py`), refreshed every 30 seconds.
 
+The bar at the top is the portfolio risk switch (`risk_status.py`): kill-switch
+ACTIVE/HALT with the reasons, drawdown, intraday drawdown, open-risk "heat" vs
+its cap, 1-day VaR and position count. It reads the Quantitative Terminal's file
+layout, all optional: `paper_trading/positions.json`, `paper_trading/account.json`,
+`paper_trading/equity_curve.json` and `logs/trades.csv`. With none of them it shows
+the defaults ($100,000, no positions, ACTIVE); copy Meridian's `paper_trading/`
+folder in to see real numbers. It only reads those files and never writes them.
+Tick **Demo** to see the HALT state.
+
 ### Install as an app
 
 The dashboard is an installable web app (manifest + service worker). With
